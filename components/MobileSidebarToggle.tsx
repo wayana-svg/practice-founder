@@ -14,23 +14,25 @@ export default function MobileSidebarToggle() {
   }, [open]);
 
   useEffect(() => {
-    function closeAfterSidebarLinkClick(event: MouseEvent) {
+    function closeAfterSidebarClick(event: MouseEvent) {
       const target = event.target as HTMLElement | null;
 
       if (!target) return;
 
-      const link = target.closest("a");
-      const sidebar = target.closest("aside, nav");
+      const sidebar = target.closest("aside, nav, [data-sidebar]");
+      const clickable = target.closest("a, button, [role='button'], [tabindex]");
 
-      if (link && sidebar) {
-        setOpen(false);
+      if (sidebar && clickable) {
+        window.setTimeout(() => {
+          setOpen(false);
+        }, 120);
       }
     }
 
-    document.addEventListener("click", closeAfterSidebarLinkClick);
+    document.addEventListener("click", closeAfterSidebarClick);
 
     return () => {
-      document.removeEventListener("click", closeAfterSidebarLinkClick);
+      document.removeEventListener("click", closeAfterSidebarClick);
     };
   }, []);
 
