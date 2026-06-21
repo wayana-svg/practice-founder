@@ -1,0 +1,974 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import type { CSSProperties } from "react";
+import { createClient } from "../../lib/supabase/client";
+
+type Employee = {
+  id: number;
+  name: string | null;
+};
+
+type Role = {
+  id: number;
+  role_name?: string | null;
+  name?: string | null;
+  department?: string | null;
+};
+
+type FormState = {
+  tracker_date: string;
+  submitted_by: string;
+
+  total_patient_encounters_today: string;
+  total_charts_completed_today: string;
+  charts_closed_same_day: string;
+  charts_pending_from_prior_days: string;
+  charts_now_less_than_7_days_old: string;
+  charts_now_greater_than_7_days_old: string;
+  time_last_chart_closed: string;
+  notes_signed_today: boolean;
+
+  did_schedule_reflect_target_service_mix: boolean;
+  schedule_reflection_notes: string;
+
+  was_there_a_staffing_gap: boolean;
+  role_impacted_id: string;
+  duration_of_staffing_gap: string;
+
+  tasks_that_could_be_delegated: string;
+  primary_bottleneck_today: string;
+  notes: string;
+};
+
+const today = new Date().toISOString().slice(0, 10);
+
+const emptyForm: FormState = {
+  tracker_date: today,
+  submitted_by: "",
+
+  total_patient_encounters_today: "0",
+  total_charts_completed_today: "0",
+  charts_closed_same_day: "0",
+  charts_pending_from_prior_days: "0",
+  charts_now_less_than_7_days_old: "0",
+  charts_now_greater_than_7_days_old: "0",
+  time_last_chart_closed: "",
+  notes_signed_today: false,
+
+  did_schedule_reflect_target_service_mix: true,
+  schedule_reflection_notes: "",
+
+  was_there_a_staffing_gap: false,
+  role_impacted_id: "",
+  duration_of_staffing_gap: "",
+
+  tasks_that_could_be_delegated: "",
+  primary_bottleneck_today: "",
+  notes: "",
+};
+
+type NumberField = {
+  key: keyof FormState;
+  label: string;
+  help: string;
+  required?: boolean;
+};
+
+const chartFields: NumberField[] = [
+  {
+    key: "total_patient_encounters_today",
+    label: "Total Patient Encounters Today",
+    help: "Total unique patients personally seen by the physician today.",
+    required: true,
+  },
+  {
+    key: "total_charts_completed_today",
+    label: "Total Charts Completed Today",
+    help: "Total charts fully completed and signed today.",
+    required: true,
+  },
+  {
+    key: "charts_closed_same_day",
+    label: "Charts Closed Same Day",
+    help: "Charts from today's visits that were completed, signed, and closed before end of day.",
+    required: true,
+  },
+  {
+    key: "charts_pending_from_prior_days",
+    label: "Charts Pending From Prior Days",
+    help: "Charts from previous days that are still open and not fully completed or signed.",
+    required: true,
+  },
+  {
+    key: "charts_now_less_than_7_days_old",
+    label: "Charts Now Less Than 7 Days Old",
+    help: "Pending charts that are currently under 7 days old.",
+  },
+  {
+    key: "charts_now_greater_than_7_days_old",
+    label: "Charts Now Greater Than 7 Days Old",
+    help: "Pending charts older than 7 days. These may delay billing and collections.",
+    required: true,
+  },
+];
+
+function toNumber(value: string) {
+  const numberValue = Number(value);
+
+  if (Number.isNaN(numberValue)) return 0;
+
+  return numberValue;
+}
+
+export default function DailyPhysicianTrackerPage() {
+  const [form, setForm] = useState<FormState>(emptyForm);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [roles, setRoles] = useState<Role[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const sameDayClosureRate = useMemo(() => {
+    const encounters = toNumber(form.total_patient_encounters_today);
+    const sameDayClosed = toNumber(form.charts_closed_same_day);
+
+    if (encounters === 0) return "N/A";
+
+    return `${((sameDayClosed / encounters) * 100).toFixed(1)}%`;
+  }, [form.total_patient_encounters_today, form.charts_closed_same_day]);
+
+  const chartBacklogTotal = useMemo(() => {
+    return (
+      toNumber(form.charts_pending_from_prior_days) +
+      toNumber(form.charts_now_less_than_7_days_old) +
+      toNumber(form.charts_now_greater_than_7_days_old)
+    );
+  }, [
+    form.charts_pending_from_prior_days,
+    form.charts_now_less_than_7_days_old,
+    form.charts_now_greater_than_7_days_old,
+  ]);
+
+  useEffect(() => {
+    loadEmployees();
+    loadRoles();
+  }, []);
+
+  async function loadEmployees() {
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from("employees")
+      .select("id, name")
+      .order("name", { ascending: true });
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setEmployees((data as Employee[]) || []);
+  }
+
+  async function loadRoles() {
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from("roles")
+      .select("id, role_name, name, department")
+      .order("id", { ascending: true });
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setRoles((data as Role[]) || []);
+  }
+
+  function getRoleLabel(role: Role) {
+    return role.role_name || role.name || `Role #${role.id}`;
+  }
+
+  function updateField<K extends keyof FormState>(field: K, value: FormState[K]) {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  function numberInput(field: NumberField) {
+    return (
+      <label style={formLabelStyle} title={field.help}>
+        <span style={labelRowStyle}>
+          {field.label}
+          {field.required ? <span>*</span> : null}
+          <span title={field.help} style={infoIconStyle}>
+            i
+          </span>
+        </span>
+
+        <input
+          type="number"
+          min="0"
+          value={String(form[field.key])}
+          onChange={(event) =>
+            updateField(field.key, event.target.value as never)
+          }
+          style={inputStyle}
+        />
+      </label>
+    );
+  }
+
+  async function submitForm() {
+    setMessage("");
+    setErrorMessage("");
+
+    if (!form.tracker_date) {
+      setErrorMessage("Date is required.");
+      return;
+    }
+
+    if (!form.submitted_by) {
+      setErrorMessage("Submitted By is required.");
+      return;
+    }
+
+    setSaving(true);
+
+    const payload = {
+      tracker_date: form.tracker_date,
+      submitted_by: Number(form.submitted_by),
+
+      total_patient_encounters_today: toNumber(
+        form.total_patient_encounters_today
+      ),
+      total_charts_completed_today: toNumber(
+        form.total_charts_completed_today
+      ),
+      charts_closed_same_day: toNumber(form.charts_closed_same_day),
+      charts_pending_from_prior_days: toNumber(
+        form.charts_pending_from_prior_days
+      ),
+      charts_now_less_than_7_days_old: toNumber(
+        form.charts_now_less_than_7_days_old
+      ),
+      charts_now_greater_than_7_days_old: toNumber(
+        form.charts_now_greater_than_7_days_old
+      ),
+      time_last_chart_closed: form.time_last_chart_closed || null,
+      notes_signed_today: form.notes_signed_today,
+
+      did_schedule_reflect_target_service_mix:
+        form.did_schedule_reflect_target_service_mix,
+      schedule_reflection_notes: form.schedule_reflection_notes || null,
+
+      was_there_a_staffing_gap: form.was_there_a_staffing_gap,
+      role_impacted_id: form.was_there_a_staffing_gap
+        ? form.role_impacted_id
+          ? Number(form.role_impacted_id)
+          : null
+        : null,
+      duration_of_staffing_gap: form.was_there_a_staffing_gap
+        ? form.duration_of_staffing_gap || null
+        : null,
+
+      tasks_that_could_be_delegated:
+        form.tasks_that_could_be_delegated || null,
+      primary_bottleneck_today: form.primary_bottleneck_today || null,
+      notes: form.notes || null,
+    };
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from("daily_physician_tracker")
+      .insert(payload);
+
+    if (error) {
+      setErrorMessage(error.message);
+      setSaving(false);
+      return;
+    }
+
+    setMessage("Daily Physician Tracker submitted.");
+    setForm(emptyForm);
+    setSaving(false);
+  }
+
+  return (
+    <main style={pageStyle}>
+      <header style={headerStyle}>
+        <div>
+          <a href="/?table=daily_physician_tracker" style={backLinkStyle}>
+            ← Back to Daily Physician Tracker
+          </a>
+
+          <div style={eyebrowStyle}>PRACTICE FOUNDER · TRACKERS</div>
+          <h1 style={titleStyle}>Daily Physician Tracker</h1>
+          <p style={descriptionStyle}>
+            Submit this form at the end of each clinical day. Track patient
+            encounters, chart completion, notes signed, schedule mix, staffing
+            gaps, delegation opportunities, and the main bottleneck for the day.
+          </p>
+        </div>
+
+        <a href="/daily-physician-tracker-list" style={managerButtonStyle}>
+          Open Manager
+        </a>
+      </header>
+
+      {message && <div style={successBoxStyle}>{message}</div>}
+      {errorMessage && <div style={errorBoxStyle}>{errorMessage}</div>}
+
+      <section style={summaryGridStyle}>
+        <div style={summaryCardStyle}>
+          <div style={summaryLabelStyle}>Encounters Today</div>
+          <div style={summaryValueStyle}>
+            {toNumber(form.total_patient_encounters_today)}
+          </div>
+        </div>
+
+        <div style={summaryCardStyle}>
+          <div style={summaryLabelStyle}>Charts Completed</div>
+          <div style={summaryValueStyle}>
+            {toNumber(form.total_charts_completed_today)}
+          </div>
+        </div>
+
+        <div style={summaryCardStyle}>
+          <div style={summaryLabelStyle}>Same-Day Closure</div>
+          <div style={summaryValueStyle}>{sameDayClosureRate}</div>
+        </div>
+
+        <div style={summaryCardStyle}>
+          <div style={summaryLabelStyle}>Chart Backlog</div>
+          <div style={summaryValueStyle}>{chartBacklogTotal}</div>
+        </div>
+      </section>
+
+      <section style={formCardStyle}>
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>GENERAL</div>
+            <h2 style={sectionTitleStyle}>Submission Details</h2>
+            <p style={sectionTextStyle}>
+              Confirm who is submitting this tracker and the date these clinical
+              KPIs belong to.
+            </p>
+          </div>
+
+          <div style={twoColumnGridStyle}>
+            <label
+              style={formLabelStyle}
+              title="The physician or employee submitting this tracker."
+            >
+              <span style={labelRowStyle}>
+                Submitted By *
+                <span
+                  title="The physician or employee submitting this tracker."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <select
+                value={form.submitted_by}
+                onChange={(event) =>
+                  updateField("submitted_by", event.target.value)
+                }
+                style={inputStyle}
+              >
+                <option value="">Select physician</option>
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label
+              style={formLabelStyle}
+              title="The business date these physician tracker numbers belong to."
+            >
+              <span style={labelRowStyle}>
+                Date *
+                <span
+                  title="The business date these physician tracker numbers belong to."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <input
+                type="date"
+                value={form.tracker_date}
+                onChange={(event) =>
+                  updateField("tracker_date", event.target.value)
+                }
+                style={inputStyle}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>CLINICAL VOLUME</div>
+            <h2 style={sectionTitleStyle}>Patient Encounters and Chart Status</h2>
+            <p style={sectionTextStyle}>
+              Track patient volume and chart completion. These numbers show how
+              quickly clinical work turns into billable claims.
+            </p>
+          </div>
+
+          <div style={formGridStyle}>
+            {chartFields.map((field) => numberInput(field))}
+
+            <label
+              style={formLabelStyle}
+              title="The time the final chart of the day was closed."
+            >
+              <span style={labelRowStyle}>
+                Time Last Chart Closed *
+                <span
+                  title="The time the final chart of the day was closed."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <input
+                type="time"
+                value={form.time_last_chart_closed}
+                onChange={(event) =>
+                  updateField("time_last_chart_closed", event.target.value)
+                }
+                style={inputStyle}
+              />
+            </label>
+
+            <label
+              style={checkboxLabelStyle}
+              title="Check this if all notes that needed to be signed today were signed."
+            >
+              <input
+                type="checkbox"
+                checked={form.notes_signed_today}
+                onChange={(event) =>
+                  updateField("notes_signed_today", event.target.checked)
+                }
+              />
+              Notes Signed Today
+            </label>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>SCHEDULE</div>
+            <h2 style={sectionTitleStyle}>Target Service Mix</h2>
+            <p style={sectionTextStyle}>
+              Confirm whether the schedule matched the intended mix of visit
+              types for the day.
+            </p>
+          </div>
+
+          <div style={twoColumnGridStyle}>
+            <label
+              style={checkboxLabelStyle}
+              title="Check this if the schedule matched the intended service mix for the day."
+            >
+              <input
+                type="checkbox"
+                checked={form.did_schedule_reflect_target_service_mix}
+                onChange={(event) =>
+                  updateField(
+                    "did_schedule_reflect_target_service_mix",
+                    event.target.checked
+                  )
+                }
+              />
+              Schedule Reflected Target Service Mix
+            </label>
+
+            <label
+              style={formLabelStyle}
+              title="Explain what was off about the schedule or service mix."
+            >
+              <span style={labelRowStyle}>
+                Schedule Reflection Notes
+                <span
+                  title="Explain what was off about the schedule or service mix."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <textarea
+                value={form.schedule_reflection_notes}
+                onChange={(event) =>
+                  updateField("schedule_reflection_notes", event.target.value)
+                }
+                style={textareaStyle}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>STAFFING</div>
+            <h2 style={sectionTitleStyle}>Staffing Gaps</h2>
+            <p style={sectionTextStyle}>
+              Track whether a staffing gap affected the physician’s day.
+            </p>
+          </div>
+
+          <div style={twoColumnGridStyle}>
+            <label
+              style={checkboxLabelStyle}
+              title="Check this if a missing or limited staff role affected the day."
+            >
+              <input
+                type="checkbox"
+                checked={form.was_there_a_staffing_gap}
+                onChange={(event) =>
+                  updateField("was_there_a_staffing_gap", event.target.checked)
+                }
+              />
+              There Was a Staffing Gap
+            </label>
+
+            <label
+              style={formLabelStyle}
+              title="The staff role that was missing, short, or impacted."
+            >
+              <span style={labelRowStyle}>
+                Role Impacted
+                <span
+                  title="The staff role that was missing, short, or impacted."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <select
+                value={form.role_impacted_id}
+                onChange={(event) =>
+                  updateField("role_impacted_id", event.target.value)
+                }
+                style={inputStyle}
+              >
+                <option value="">Select role</option>
+                {roles.map((role) => (
+                  <option key={role.id} value={role.id}>
+                    {getRoleLabel(role)}
+                    {role.department ? ` — ${role.department}` : ""}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label
+              style={formLabelStyle}
+              title="How long the staffing gap affected the day."
+            >
+              <span style={labelRowStyle}>
+                Duration of Staffing Gap
+                <span
+                  title="How long the staffing gap affected the day."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <input
+                type="text"
+                value={form.duration_of_staffing_gap}
+                onChange={(event) =>
+                  updateField("duration_of_staffing_gap", event.target.value)
+                }
+                placeholder="Example: 2 hours, half day, all day"
+                style={inputStyle}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>BOTTLENECKS</div>
+            <h2 style={sectionTitleStyle}>Delegation and Bottlenecks</h2>
+            <p style={sectionTextStyle}>
+              Record what slowed the physician down and what could be delegated.
+            </p>
+          </div>
+
+          <div style={twoColumnGridStyle}>
+            <label
+              style={formLabelStyle}
+              title="Tasks the physician handled that could potentially be delegated to another role."
+            >
+              <span style={labelRowStyle}>
+                Tasks That Could Be Delegated
+                <span
+                  title="Tasks the physician handled that could potentially be delegated to another role."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <textarea
+                value={form.tasks_that_could_be_delegated}
+                onChange={(event) =>
+                  updateField("tasks_that_could_be_delegated", event.target.value)
+                }
+                style={textareaStyle}
+              />
+            </label>
+
+            <label
+              style={formLabelStyle}
+              title="The biggest issue, delay, or operational bottleneck affecting the physician today."
+            >
+              <span style={labelRowStyle}>
+                Primary Bottleneck Today
+                <span
+                  title="The biggest issue, delay, or operational bottleneck affecting the physician today."
+                  style={infoIconStyle}
+                >
+                  i
+                </span>
+              </span>
+
+              <textarea
+                value={form.primary_bottleneck_today}
+                onChange={(event) =>
+                  updateField("primary_bottleneck_today", event.target.value)
+                }
+                style={textareaStyle}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section style={sectionStyle}>
+          <div style={sectionIntroStyle}>
+            <div style={sectionTagStyle}>NOTES</div>
+            <h2 style={sectionTitleStyle}>Notes</h2>
+            <p style={sectionTextStyle}>
+              Add anything unusual about the day that Practice Founder should
+              review.
+            </p>
+          </div>
+
+          <label
+            style={formLabelStyle}
+            title="Extra context, unusual issues, or follow-up notes from the day."
+          >
+            <span style={labelRowStyle}>
+              Notes
+              <span
+                title="Extra context, unusual issues, or follow-up notes from the day."
+                style={infoIconStyle}
+              >
+                i
+              </span>
+            </span>
+
+            <textarea
+              value={form.notes}
+              onChange={(event) => updateField("notes", event.target.value)}
+              style={textareaStyle}
+            />
+          </label>
+        </section>
+
+        <div style={confirmationBoxStyle}>
+          Before submitting, confirm the chart fields are complete. This tracker
+          helps show whether clinical work is becoming billable work on time.
+        </div>
+
+        <div style={buttonRowStyle}>
+          <button
+            type="button"
+            onClick={submitForm}
+            disabled={saving}
+            style={submitButtonStyle}
+          >
+            {saving ? "Submitting..." : "Submit Daily Physician Tracker"}
+          </button>
+
+          <a href="/daily-physician-tracker-list" style={secondaryButtonStyle}>
+            Open Manager
+          </a>
+
+          <a href="/?table=daily_physician_tracker" style={secondaryButtonStyle}>
+            Back to Daily Physician Tracker
+          </a>
+        </div>
+      </section>
+    </main>
+  );
+}
+
+const colors = {
+  navy: "#1C2333",
+  gold: "#C9A84C",
+  goldPale: "#F5EDD8",
+  cream: "#F8F5EE",
+  white: "#FFFFFF",
+  slate: "#5F6673",
+  border: "#DED8C8",
+  green: "#166534",
+  red: "#9F1239",
+};
+
+const pageStyle: CSSProperties = {
+  minHeight: "100vh",
+  background: colors.cream,
+  color: colors.navy,
+  padding: "34px",
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+};
+
+const headerStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "20px",
+  marginBottom: "24px",
+};
+
+const backLinkStyle: CSSProperties = {
+  color: colors.navy,
+  textDecoration: "none",
+  fontWeight: 800,
+  display: "inline-block",
+  marginBottom: "16px",
+};
+
+const eyebrowStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "11px",
+  letterSpacing: "0.16em",
+  marginBottom: "10px",
+};
+
+const titleStyle: CSSProperties = {
+  margin: 0,
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "42px",
+  fontWeight: 600,
+  letterSpacing: "-0.03em",
+};
+
+const descriptionStyle: CSSProperties = {
+  margin: "8px 0 0",
+  maxWidth: "760px",
+  color: colors.slate,
+};
+
+const managerButtonStyle: CSSProperties = {
+  background: colors.white,
+  color: colors.navy,
+  border: `1px solid ${colors.border}`,
+  textDecoration: "none",
+  padding: "12px 16px",
+  borderRadius: "10px",
+  fontWeight: 800,
+};
+
+const successBoxStyle: CSSProperties = {
+  background: "#ecfdf5",
+  color: colors.green,
+  border: "1px solid #bbf7d0",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const errorBoxStyle: CSSProperties = {
+  background: "#fff1f2",
+  color: colors.red,
+  border: "1px solid #fecdd3",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const summaryGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: "14px",
+  marginBottom: "18px",
+};
+
+const summaryCardStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "18px",
+};
+
+const summaryLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+};
+
+const summaryValueStyle: CSSProperties = {
+  marginTop: "8px",
+  fontSize: "22px",
+  fontWeight: 800,
+};
+
+const formCardStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "24px",
+  boxShadow: "0 20px 50px rgba(28,35,51,0.08)",
+};
+
+const sectionStyle: CSSProperties = {
+  borderBottom: `1px solid ${colors.border}`,
+  paddingBottom: "24px",
+  marginBottom: "24px",
+};
+
+const sectionIntroStyle: CSSProperties = {
+  background: colors.goldPale,
+  borderLeft: `5px solid ${colors.gold}`,
+  padding: "14px",
+  marginBottom: "18px",
+};
+
+const sectionTagStyle: CSSProperties = {
+  fontFamily: "var(--font-dm-mono), monospace",
+  color: colors.gold,
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+};
+
+const sectionTitleStyle: CSSProperties = {
+  margin: "6px 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "26px",
+};
+
+const sectionTextStyle: CSSProperties = {
+  margin: 0,
+  color: colors.slate,
+};
+
+const twoColumnGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: "16px",
+};
+
+const formGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: "16px",
+};
+
+const formLabelStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  fontWeight: 800,
+};
+
+const labelRowStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "6px",
+};
+
+const infoIconStyle: CSSProperties = {
+  width: "16px",
+  height: "16px",
+  borderRadius: "999px",
+  background: colors.goldPale,
+  color: colors.navy,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  fontSize: "11px",
+  cursor: "help",
+};
+
+const checkboxLabelStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  fontWeight: 800,
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "12px",
+};
+
+const inputStyle: CSSProperties = {
+  width: "100%",
+  height: "42px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+  background: colors.white,
+  color: colors.navy,
+};
+
+const textareaStyle: CSSProperties = {
+  width: "100%",
+  minHeight: "120px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "10px",
+  background: colors.white,
+  color: colors.navy,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+};
+
+const confirmationBoxStyle: CSSProperties = {
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "14px",
+  color: colors.slate,
+  marginBottom: "18px",
+};
+
+const buttonRowStyle: CSSProperties = {
+  display: "flex",
+  gap: "10px",
+  flexWrap: "wrap",
+};
+
+const submitButtonStyle: CSSProperties = {
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "10px",
+  padding: "12px 16px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const secondaryButtonStyle: CSSProperties = {
+  background: colors.goldPale,
+  color: colors.navy,
+  borderRadius: "10px",
+  padding: "12px 16px",
+  fontWeight: 900,
+  textDecoration: "none",
+};

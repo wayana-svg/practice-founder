@@ -1,0 +1,584 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { createClient } from "../../lib/supabase/client";
+
+type Employee = {
+  id: number;
+  name: string | null;
+};
+
+type FormState = {
+  practice_id: string;
+  submitted_by: string;
+  week_of: string;
+  batch_name: string;
+  total_claims_submitted: string;
+  total_rejections: string;
+  total_denials: string;
+  denials_resubmitted: string;
+  avg_resubmission_turnaround: string;
+  notes: string;
+};
+
+const fieldDescriptions = {
+  submitted_by:
+    "Choose the employee responsible for preparing or submitting this weekly claims summary.",
+  week_of:
+    "Select the week this claims summary belongs to. Use the main week date your practice uses for weekly reporting.",
+  batch_name:
+    "Enter a clear name for this weekly claims batch. Example: June Week 1 Claims or Week of June 10.",
+  total_claims_submitted:
+    "Enter the total number of claims submitted during this weekly reporting period.",
+  total_rejections:
+    "Enter the number of claims rejected before payer processing because of missing, invalid, or incorrect claim information.",
+  total_denials:
+    "Enter the number of claims denied by payers after review or processing.",
+  denials_resubmitted:
+    "Enter how many denied claims were corrected and resubmitted during this week.",
+  avg_resubmission_turnaround:
+    "Enter the average number of days it took to correct and resubmit denied claims.",
+  rejectionRate:
+    "This is automatically calculated from Total Rejections divided by Total Claims Submitted.",
+  notes:
+    "Add any useful context, payer issues, denial trends, rejection reasons, cleanup work, or follow-up needs.",
+};
+
+const emptyForm: FormState = {
+  practice_id: "1",
+  submitted_by: "",
+  week_of: "",
+  batch_name: "",
+  total_claims_submitted: "",
+  total_rejections: "",
+  total_denials: "",
+  denials_resubmitted: "",
+  avg_resubmission_turnaround: "",
+  notes: "",
+};
+
+export default function WeeklyClaimsSummaryPage() {
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [form, setForm] = useState<FormState>(emptyForm);
+
+  useEffect(() => {
+    async function loadEmployees() {
+      const supabase = createClient();
+
+      const { data, error } = await supabase
+        .from("employees")
+        .select("id, name")
+        .order("name", { ascending: true });
+
+      if (error) {
+        setErrorMessage(error.message);
+        return;
+      }
+
+      setEmployees(data || []);
+    }
+
+    loadEmployees();
+  }, []);
+
+  const rejectionRate = useMemo(() => {
+    const submitted = Number(form.total_claims_submitted || 0);
+    const rejections = Number(form.total_rejections || 0);
+
+    if (submitted === 0) return "N/A";
+
+    return `${((rejections / submitted) * 100).toFixed(1)}%`;
+  }, [form.total_claims_submitted, form.total_rejections]);
+
+  function updateField(field: keyof FormState, value: string) {
+    setForm((current) => ({
+      ...current,
+      [field]: value,
+    }));
+  }
+
+  function numberValue(value: string) {
+    return Number(value || 0);
+  }
+
+  async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setMessage("");
+    setErrorMessage("");
+
+    if (!form.submitted_by) {
+      setErrorMessage("Submitted By is required.");
+      return;
+    }
+
+    if (!form.week_of) {
+      setErrorMessage("Week Of is required.");
+      return;
+    }
+
+    const supabase = createClient();
+
+    const payload = {
+      practice_id: Number(form.practice_id),
+      submitted_by: Number(form.submitted_by),
+      week_of: form.week_of || null,
+      batch_name: form.batch_name.trim() || null,
+      total_claims_submitted: numberValue(form.total_claims_submitted),
+      total_rejections: numberValue(form.total_rejections),
+      total_denials: numberValue(form.total_denials),
+      denials_resubmitted: numberValue(form.denials_resubmitted),
+      avg_resubmission_turnaround: numberValue(
+        form.avg_resubmission_turnaround
+      ),
+      notes: form.notes.trim() || null,
+    };
+
+    const { error } = await supabase
+      .from("weekly_claims_summary")
+      .insert(payload);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Weekly claims summary saved.");
+    setForm(emptyForm);
+  }
+
+  return (
+    <main style={pageStyle}>
+      <section style={headerStyle}>
+        <div>
+          <a href="/?table=weekly_claims_summary" style={backLinkStyle}>
+            ← Back to Weekly Claims Summary
+          </a>
+
+          <div style={eyebrowStyle}>PRACTICE FOUNDER · BILLING ACTIVITIES</div>
+
+          <h1 style={titleStyle}>Weekly Claims Summary</h1>
+
+          <p style={descriptionStyle}>
+            Submit weekly billing claim totals, rejections, denials,
+            resubmissions, and turnaround details.
+          </p>
+        </div>
+
+        <a href="/weekly-claims-summary-list" style={managerButtonStyle}>
+          Open Manager
+        </a>
+      </section>
+
+      {message ? <div style={successBoxStyle}>{message}</div> : null}
+      {errorMessage ? <div style={errorBoxStyle}>{errorMessage}</div> : null}
+
+      <form onSubmit={handleSubmit} style={formShellStyle}>
+        <section style={formSectionStyle}>
+          <div style={sectionHeaderStyle}>
+            <div style={sectionEyebrowStyle}>SECTION 1</div>
+            <h2 style={sectionTitleStyle}>Submission Details</h2>
+            <p style={sectionDescriptionStyle}>
+              Identify who submitted the summary and which week or batch it
+              belongs to.
+            </p>
+          </div>
+
+          <div style={formGridStyle}>
+            <label style={labelStyle} title={fieldDescriptions.submitted_by}>
+              Submitted By *
+              <select
+                required
+                value={form.submitted_by}
+                onChange={(e) => updateField("submitted_by", e.target.value)}
+                style={inputStyle}
+                title={fieldDescriptions.submitted_by}
+              >
+                <option value="">
+                  Select employee
+                </option>
+                {employees.map((employee) => (
+                  <option key={employee.id} value={employee.id}>
+                    {employee.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={labelStyle} title={fieldDescriptions.week_of}>
+              Week Of *
+              <input
+                required
+                type="date"
+                value={form.week_of}
+                onChange={(e) => updateField("week_of", e.target.value)}
+                style={inputStyle}
+                title={fieldDescriptions.week_of}
+              />
+            </label>
+
+            <label style={wideLabelStyle} title={fieldDescriptions.batch_name}>
+              Batch Name
+              <input
+                type="text"
+                value={form.batch_name}
+                onChange={(e) => updateField("batch_name", e.target.value)}
+                style={inputStyle}
+                placeholder="Example: June Week 1 Claims"
+                title={fieldDescriptions.batch_name}
+              />
+            </label>
+          </div>
+        </section>
+
+        <section style={formSectionStyle}>
+          <div style={sectionHeaderStyle}>
+            <div style={sectionEyebrowStyle}>SECTION 2</div>
+            <h2 style={sectionTitleStyle}>Claims Volume</h2>
+            <p style={sectionDescriptionStyle}>
+              Enter the total claims submitted and the number of claim
+              rejections for the week.
+            </p>
+          </div>
+
+          <div style={formGridStyle}>
+            <NumberInput
+              label="Total Claims Submitted"
+              value={form.total_claims_submitted}
+              description={fieldDescriptions.total_claims_submitted}
+              onChange={(value) => updateField("total_claims_submitted", value)}
+            />
+
+            <NumberInput
+              label="Total Rejections"
+              value={form.total_rejections}
+              description={fieldDescriptions.total_rejections}
+              onChange={(value) => updateField("total_rejections", value)}
+            />
+
+            <div style={calculatedBoxStyle} title={fieldDescriptions.rejectionRate}>
+              <div style={calculatedLabelStyle}>CALCULATED RATE</div>
+              <strong style={calculatedValueStyle}>{rejectionRate}</strong>
+              <span style={calculatedSmallStyle}>Rejection Rate</span>
+            </div>
+          </div>
+        </section>
+
+        <section style={formSectionStyle}>
+          <div style={sectionHeaderStyle}>
+            <div style={sectionEyebrowStyle}>SECTION 3</div>
+            <h2 style={sectionTitleStyle}>Denials & Resubmissions</h2>
+            <p style={sectionDescriptionStyle}>
+              Track denied claims, corrected resubmissions, and turnaround time.
+            </p>
+          </div>
+
+          <div style={formGridStyle}>
+            <NumberInput
+              label="Total Denials"
+              value={form.total_denials}
+              description={fieldDescriptions.total_denials}
+              onChange={(value) => updateField("total_denials", value)}
+            />
+
+            <NumberInput
+              label="Denials Resubmitted"
+              value={form.denials_resubmitted}
+              description={fieldDescriptions.denials_resubmitted}
+              onChange={(value) => updateField("denials_resubmitted", value)}
+            />
+
+            <NumberInput
+              label="Average Resubmission Turnaround"
+              value={form.avg_resubmission_turnaround}
+              description={fieldDescriptions.avg_resubmission_turnaround}
+              onChange={(value) =>
+                updateField("avg_resubmission_turnaround", value)
+              }
+            />
+          </div>
+        </section>
+
+        <section style={formSectionStyle}>
+          <div style={sectionHeaderStyle}>
+            <div style={sectionEyebrowStyle}>SECTION 4</div>
+            <h2 style={sectionTitleStyle}>Notes</h2>
+            <p style={sectionDescriptionStyle}>
+              Add context that will help the team understand trends,
+              blockers, or cleanup work.
+            </p>
+          </div>
+
+          <label style={wideLabelStyle} title={fieldDescriptions.notes}>
+            Notes
+            <textarea
+              value={form.notes}
+              onChange={(e) => updateField("notes", e.target.value)}
+              style={textareaStyle}
+              title={fieldDescriptions.notes}
+            />
+          </label>
+        </section>
+
+        <div style={buttonRowStyle}>
+          <a href="/?table=weekly_claims_summary" style={secondaryButtonStyle}>
+            Cancel
+          </a>
+
+          <button type="submit" style={buttonStyle}>
+            Save Weekly Claims Summary
+          </button>
+        </div>
+      </form>
+    </main>
+  );
+}
+
+function NumberInput({
+  label,
+  value,
+  description,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  description: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label style={labelStyle} title={description}>
+      {label}
+      <input
+        type="number"
+        step="1"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        style={inputStyle}
+        title={description}
+      />
+    </label>
+  );
+}
+
+const colors = {
+  navy: "#1C2333",
+  gold: "#C9A84C",
+  goldPale: "#F5EDD8",
+  cream: "#F8F5EE",
+  white: "#FFFFFF",
+  slate: "#5F6673",
+  border: "#DED8C8",
+  green: "#166534",
+  red: "#9F1239",
+};
+
+const pageStyle: React.CSSProperties = {
+  minHeight: "100vh",
+  background: colors.cream,
+  color: colors.navy,
+  padding: "34px",
+  fontFamily: "DM Sans, Arial, sans-serif",
+};
+
+const headerStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "24px",
+  alignItems: "flex-start",
+  marginBottom: "24px",
+};
+
+const backLinkStyle: React.CSSProperties = {
+  display: "inline-block",
+  marginBottom: "16px",
+  color: colors.navy,
+  textDecoration: "none",
+  fontWeight: 800,
+};
+
+const eyebrowStyle: React.CSSProperties = {
+  color: colors.gold,
+  fontFamily: "DM Mono, monospace",
+  fontSize: "11px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+  fontWeight: 900,
+};
+
+const titleStyle: React.CSSProperties = {
+  margin: "8px 0 0",
+  fontFamily: "Playfair Display, Georgia, serif",
+  fontSize: "42px",
+  fontWeight: 600,
+};
+
+const descriptionStyle: React.CSSProperties = {
+  color: colors.slate,
+  fontSize: "16px",
+  maxWidth: "780px",
+  lineHeight: 1.6,
+};
+
+const managerButtonStyle: React.CSSProperties = {
+  background: colors.goldPale,
+  color: colors.navy,
+  textDecoration: "none",
+  borderRadius: "10px",
+  padding: "12px 16px",
+  fontWeight: 900,
+};
+
+const formShellStyle: React.CSSProperties = {
+  display: "grid",
+  gap: "16px",
+  maxWidth: "980px",
+};
+
+const formSectionStyle: React.CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "18px",
+  display: "grid",
+  gap: "16px",
+};
+
+const sectionHeaderStyle: React.CSSProperties = {
+  display: "grid",
+  gap: "4px",
+};
+
+const sectionEyebrowStyle: React.CSSProperties = {
+  color: colors.gold,
+  fontFamily: "DM Mono, monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+  fontWeight: 900,
+};
+
+const sectionTitleStyle: React.CSSProperties = {
+  margin: 0,
+  color: colors.navy,
+  fontSize: "22px",
+};
+
+const sectionDescriptionStyle: React.CSSProperties = {
+  margin: 0,
+  color: colors.slate,
+  fontSize: "13px",
+  lineHeight: 1.45,
+  fontWeight: 600,
+};
+
+const formGridStyle: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+  gap: "14px",
+  alignItems: "start",
+};
+
+const labelStyle: React.CSSProperties = {
+  display: "grid",
+  gap: "8px",
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "14px",
+  fontWeight: 900,
+};
+
+const wideLabelStyle: React.CSSProperties = {
+  ...labelStyle,
+  gridColumn: "1 / -1",
+};
+
+const inputStyle: React.CSSProperties = {
+  height: "42px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+  color: colors.navy,
+  background: colors.white,
+};
+
+const textareaStyle: React.CSSProperties = {
+  minHeight: "110px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "10px",
+  color: colors.navy,
+  background: colors.white,
+};
+
+const calculatedBoxStyle: React.CSSProperties = {
+  background: colors.goldPale,
+  border: `1px solid ${colors.gold}`,
+  padding: "14px",
+  display: "grid",
+  gap: "5px",
+  alignContent: "center",
+};
+
+const calculatedLabelStyle: React.CSSProperties = {
+  color: colors.gold,
+  fontFamily: "DM Mono, monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+  fontWeight: 900,
+};
+
+const calculatedValueStyle: React.CSSProperties = {
+  fontSize: "26px",
+  color: colors.navy,
+};
+
+const calculatedSmallStyle: React.CSSProperties = {
+  color: colors.slate,
+  fontSize: "13px",
+  fontWeight: 700,
+};
+
+const buttonRowStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: "10px",
+  flexWrap: "wrap",
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  background: colors.goldPale,
+  color: colors.navy,
+  textDecoration: "none",
+  borderRadius: "8px",
+  padding: "12px 16px",
+  fontWeight: 900,
+};
+
+const buttonStyle: React.CSSProperties = {
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "8px",
+  padding: "12px 18px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const successBoxStyle: React.CSSProperties = {
+  background: "#ecfdf5",
+  color: colors.green,
+  border: "1px solid #bbf7d0",
+  padding: "14px",
+  marginBottom: "16px",
+  fontWeight: 800,
+};
+
+const errorBoxStyle: React.CSSProperties = {
+  background: "#fff1f2",
+  color: colors.red,
+  border: "1px solid #fecdd3",
+  padding: "14px",
+  marginBottom: "16px",
+  fontWeight: 800,
+};

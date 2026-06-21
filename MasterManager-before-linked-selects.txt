@@ -1,0 +1,4081 @@
+"use client";
+
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { createClient } from "../lib/supabase/client";
+
+type FieldOption =
+  | string
+  | {
+      value: string;
+      label: string;
+      description?: string;
+    };
+
+type SmartDueDateKeys = {
+  dueDateType: string;
+  dueDate: string;
+  dueTime: string;
+  recurrenceFrequency: string;
+  recurrenceInterval: string;
+  recurrenceDays: string;
+  recurrenceMonthlyRule: string;
+  skipWeekends: string;
+  createNextWhen: string;
+  recurrenceEndDate: string;
+  nextTaskStatus: string;
+  recurrenceFieldsToCopy: string;
+};
+
+type LinkedRecordConfig = {
+  tableName: string;
+  primaryKey: string;
+  title: string;
+  labelField?: string;
+  description?: string;
+  fields?: {
+    key: string;
+    label: string;
+    type?: "text" | "date" | "currency" | "employee" | "boolean";
+  }[];
+};
+
+export type ManagerField = {
+  key: string;
+  label: string;
+  type:
+    | "text"
+    | "textarea"
+    | "number"
+    | "date"
+    | "currency"
+    | "select"
+    | "url"
+    | "employee"
+    | "boolean"
+    | "smart_due_date";
+  description?: string;
+  required?: boolean;
+  options?: FieldOption[];
+  showInAddForm?: boolean;
+  showInEditForm?: boolean;
+  showInDatabasePayload?: boolean;
+  defaultValue?: string;
+  sortOrder?: string[];
+  smartDueDateKeys?: SmartDueDateKeys;
+  linkedRecord?: LinkedRecordConfig;
+};
+
+type AiPromptToolingConfig =
+  | boolean
+  | {
+      enabled: boolean;
+      title: string;
+      descriptionFieldKey: string;
+      linkFieldKey?: string;
+      defaultToolLink?: string;
+    };
+
+export type RowData = Record<string, string | number | boolean | null>;
+
+export type ManagerMetric = {
+  label: string;
+  description: string;
+  getValue: (rows: RowData[]) => string | number;
+};
+
+export type MasterManagerConfig = {
+  title: string;
+  eyebrow: string;
+  description: string;
+  tableName: string;
+  primaryKey: string;
+  backPath: string;
+  fields: ManagerField[];
+  defaultVisibleFields: string[];
+  defaultSortField?: string;
+  addButtonLabel: string;
+  addPath?: string;
+  aiPromptTooling?: AiPromptToolingConfig;
+  metrics?: ManagerMetric[];
+};
+
+type Employee = {
+  id: number;
+  name: string | null;
+};
+
+type DraftData = Record<string, string>;
+type DraftTarget = "new" | "edit" | "record";
+type ActiveMenu = "fields" | "sort" | "filter" | "group" | null;
+
+type ActiveFilter = {
+  id: number;
+  fieldKey: string;
+  value: string;
+};
+
+type DueDateModalState = {
+  open: boolean;
+  target: DraftTarget;
+  field: ManagerField | null;
+};
+
+type LinkedRecordModalState = {
+  open: boolean;
+  config: LinkedRecordConfig | null;
+  record: RowData | null;
+  loading: boolean;
+  error: string;
+};
+
+type MasterManagerProps = {
+  config: MasterManagerConfig;
+};
+
+const descriptionTemplate = `What is the purpose of the task?
+
+What resources are needed to complete this task?
+
+How do we know the task is done?`;
+
+const nonCopyableRecurringFields = new Set([
+  "smart_due_date",
+  "due_date_type",
+  "due_date",
+  "due_time",
+  "recurrence_frequency",
+  "recurrence_interval",
+  "recurrence_days",
+  "recurrence_monthly_rule",
+  "skip_weekends",
+  "create_next_when",
+  "recurrence_end_date",
+  "next_task_status",
+  "recurrence_fields_to_copy",
+  "parent_task_id",
+]);
+
+function aiPromptIsEnabled(config?: AiPromptToolingConfig) {
+  if (!config) return false;
+  if (typeof config === "boolean") return config;
+  return config.enabled;
+}
+
+function getAiPromptConfig(config?: AiPromptToolingConfig) {
+  if (!config) {
+    return {
+      enabled: false,
+      title: "Task Creator",
+      descriptionFieldKey: "description",
+      linkFieldKey: "ai_prompt_tool_link",
+      defaultToolLink: "https://chatgpt.com/g/g-BR7u9y8sL-task-creator",
+    };
+  }
+
+  if (typeof config === "boolean") {
+    return {
+      enabled: config,
+      title: "Task Creator",
+      descriptionFieldKey: "description",
+      linkFieldKey: "ai_prompt_tool_link",
+      defaultToolLink: "https://chatgpt.com/g/g-BR7u9y8sL-task-creator",
+    };
+  }
+
+  return config;
+}
+
+function escapeCsvValue(value: string | number | boolean | null | undefined) {
+  if (value === null || value === undefined) return "";
+
+  const text = String(value);
+
+  if (text.includes(",") || text.includes('"') || text.includes("\n")) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+function parseCsvLine(line: string) {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    const nextCharacter = line[index + 1];
+
+    if (character === '"' && inQuotes && nextCharacter === '"') {
+      current += '"';
+      index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (character === "," && !inQuotes) {
+      values.push(current);
+      current = "";
+      continue;
+    }
+
+    current += character;
+  }
+
+  values.push(current);
+
+  return values;
+}
+
+function parseCsv(text: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== "");
+
+  if (lines.length < 2) {
+    return {
+      headers: [] as string[],
+      rows: [] as Record<string, string>[],
+    };
+  }
+
+  const headers = parseCsvLine(lines[0]).map((header) => header.trim());
+
+  const rows = lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    const row: Record<string, string> = {};
+
+    headers.forEach((header, index) => {
+      row[header] = values[index] || "";
+    });
+
+    return row;
+  });
+
+  return { headers, rows };
+}
+
+export default function MasterManager({ config }: MasterManagerProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [rows, setRows] = useState<RowData[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const [activeMenu, setActiveMenu] = useState<ActiveMenu>(null);
+  const [rowActionMenuId, setRowActionMenuId] = useState<string | number | null>(
+    null
+  );
+
+  const [searchText, setSearchText] = useState("");
+  const [sortBy, setSortBy] = useState(
+    config.defaultSortField || config.fields[0]?.key || ""
+  );
+  const [sortReverse, setSortReverse] = useState(false);
+  const [groupBy, setGroupBy] = useState("");
+  const [filters, setFilters] = useState<ActiveFilter[]>([]);
+
+  const [visibleFields, setVisibleFields] = useState<string[]>(
+    config.defaultVisibleFields
+  );
+  const [fieldSearch, setFieldSearch] = useState("");
+
+  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
+
+  const [addPanelOpen, setAddPanelOpen] = useState(false);
+  const [newDraft, setNewDraft] = useState<DraftData>(() => createEmptyDraft());
+
+  const [editingRowId, setEditingRowId] = useState<string | number | null>(null);
+  const [editDraft, setEditDraft] = useState<DraftData>(() => createEmptyDraft());
+
+  const [openRecordId, setOpenRecordId] = useState<string | number | null>(null);
+  const [recordDraft, setRecordDraft] = useState<DraftData>(() =>
+    createEmptyDraft()
+  );
+
+  const [dueDateModal, setDueDateModal] = useState<DueDateModalState>({
+    open: false,
+    target: "new",
+    field: null,
+  });
+  const [dueDateDraft, setDueDateDraft] = useState<DraftData>({});
+  const [calendarMonth, setCalendarMonth] = useState<Date>(() => new Date());
+
+  const [linkedRecordModal, setLinkedRecordModal] =
+    useState<LinkedRecordModalState>({
+      open: false,
+      config: null,
+      record: null,
+      loading: false,
+      error: "",
+    });
+
+  const [aiPromptOpen, setAiPromptOpen] = useState(false);
+  const [aiPurpose, setAiPurpose] = useState("");
+  const [aiResources, setAiResources] = useState("");
+  const [aiDone, setAiDone] = useState("");
+
+  useEffect(() => {
+    loadRows();
+    loadEmployees();
+
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("add") === "1") {
+        openAddPanel();
+      }
+    }
+  }, []);
+
+  function createEmptyDraft() {
+    const draft: DraftData = {};
+
+    config.fields.forEach((field) => {
+      if (field.defaultValue !== undefined) {
+        draft[field.key] = field.defaultValue;
+        return;
+      }
+
+      if (field.key === "description") {
+        draft[field.key] = descriptionTemplate;
+        return;
+      }
+
+      if (field.type === "smart_due_date") {
+        draft[field.key] = "";
+        return;
+      }
+
+      draft[field.key] = "";
+    });
+
+    return draft;
+  }
+
+  function normalizeOption(option: FieldOption) {
+    if (typeof option === "string") {
+      return {
+        value: option,
+        label: option,
+        description: "",
+      };
+    }
+
+    return option;
+  }
+
+  function getField(fieldKey: string) {
+    return config.fields.find((field) => field.key === fieldKey);
+  }
+
+  function getFieldDescription(field: ManagerField) {
+    const optionDescriptions = (field.options || [])
+      .map(normalizeOption)
+      .filter((option) => option.description)
+      .map((option) => `${option.label}: ${option.description}`)
+      .join("\n");
+
+    const linkedDescription = field.linkedRecord?.description || "";
+    const parts = [field.description, linkedDescription, optionDescriptions].filter(
+      Boolean
+    );
+
+    return parts.join("\n\n");
+  }
+
+  function labelWithInfo(field: ManagerField): ReactNode {
+    const infoText = getFieldDescription(field);
+
+    return (
+      <span style={fieldLabelRowStyle}>
+        <span>{field.label}</span>
+        {field.required ? <span style={requiredStyle}>*</span> : null}
+        {infoText ? (
+          <span title={infoText} style={infoIconStyle}>
+            i
+          </span>
+        ) : null}
+      </span>
+    );
+  }
+
+  function getEmployeeName(id: string | number | boolean | null) {
+    if (!id) return "Unassigned";
+
+    const employee = employees.find((item) => item.id === Number(id));
+
+    return employee?.name || `Employee #${id}`;
+  }
+
+  function getRowId(row: RowData) {
+    const value = row[config.primaryKey];
+
+    if (value === null || value === undefined) return "";
+
+    return String(value);
+  }
+
+  function getSelectedRows() {
+    return rows.filter((row) => selectedRowIds.includes(getRowId(row)));
+  }
+
+  function rowIsSelected(row: RowData) {
+    return selectedRowIds.includes(getRowId(row));
+  }
+
+  function toggleRowSelection(row: RowData) {
+    const rowId = getRowId(row);
+
+    if (!rowId) return;
+
+    setSelectedRowIds((current) => {
+      if (current.includes(rowId)) {
+        return current.filter((id) => id !== rowId);
+      }
+
+      return [...current, rowId];
+    });
+  }
+
+  function selectAllVisibleRows() {
+    const visibleIds = filteredRows.map(getRowId).filter(Boolean);
+    const allVisibleSelected =
+      visibleIds.length > 0 &&
+      visibleIds.every((id) => selectedRowIds.includes(id));
+
+    if (allVisibleSelected) {
+      setSelectedRowIds((current) =>
+        current.filter((id) => !visibleIds.includes(id))
+      );
+      return;
+    }
+
+    setSelectedRowIds((current) => Array.from(new Set([...current, ...visibleIds])));
+  }
+
+  async function loadRows() {
+    setLoading(true);
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from(config.tableName)
+      .select("*")
+      .limit(500);
+
+    if (error) {
+      setErrorMessage(error.message);
+      setRows([]);
+      setLoading(false);
+      return;
+    }
+
+    setRows((data as RowData[]) || []);
+    setLoading(false);
+  }
+
+  async function loadEmployees() {
+    const needsEmployees = config.fields.some(
+      (field) =>
+        field.type === "employee" ||
+        field.linkedRecord?.fields?.some((linkedField) => linkedField.type === "employee")
+    );
+
+    if (!needsEmployees) return;
+
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from("employees")
+      .select("id, name")
+      .order("name", { ascending: true });
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setEmployees((data as Employee[]) || []);
+  }
+
+  function updateNewDraft(fieldKey: string, value: string) {
+    setNewDraft((current) => ({
+      ...current,
+      [fieldKey]: value,
+    }));
+  }
+
+  function updateEditDraft(fieldKey: string, value: string) {
+    setEditDraft((current) => ({
+      ...current,
+      [fieldKey]: value,
+    }));
+  }
+
+  function updateRecordDraft(fieldKey: string, value: string) {
+    setRecordDraft((current) => ({
+      ...current,
+      [fieldKey]: value,
+    }));
+  }
+
+  function updateDraftTarget(target: DraftTarget, updates: DraftData) {
+    if (target === "new") {
+      setNewDraft((current) => ({
+        ...current,
+        ...updates,
+      }));
+    }
+
+    if (target === "edit") {
+      setEditDraft((current) => ({
+        ...current,
+        ...updates,
+      }));
+    }
+
+    if (target === "record") {
+      setRecordDraft((current) => ({
+        ...current,
+        ...updates,
+      }));
+    }
+  }
+
+  function getDraftByTarget(target: DraftTarget) {
+    if (target === "new") return newDraft;
+    if (target === "edit") return editDraft;
+    return recordDraft;
+  }
+
+  function rowToDraft(row: RowData) {
+    const draft: DraftData = {};
+
+    config.fields.forEach((field) => {
+      if (field.type === "smart_due_date") {
+        draft[field.key] = "";
+        return;
+      }
+
+      const value = row[field.key];
+
+      if (value === null || value === undefined) {
+        draft[field.key] = "";
+      } else {
+        draft[field.key] = String(value);
+      }
+    });
+
+    return draft;
+  }
+
+  function convertDraftToPayload(draft: DraftData) {
+    const payload: RowData = {};
+
+    config.fields.forEach((field) => {
+      if (field.showInDatabasePayload === false) return;
+      if (field.type === "smart_due_date") return;
+      if (field.key === config.primaryKey) return;
+
+      const value = draft[field.key];
+
+      if (value === "" || value === undefined) {
+        payload[field.key] = null;
+        return;
+      }
+
+      if (
+        field.type === "number" ||
+        field.type === "currency" ||
+        field.type === "employee"
+      ) {
+        payload[field.key] = Number(value);
+        return;
+      }
+
+      if (field.type === "boolean") {
+        payload[field.key] = value === "true";
+        return;
+      }
+
+      payload[field.key] = value;
+    });
+
+    return payload;
+  }
+
+  function openAddPanel() {
+    if (config.addPath && typeof window !== "undefined") {
+      window.location.href = config.addPath;
+      return;
+    }
+
+    setMessage("");
+    setErrorMessage("");
+    setNewDraft(createEmptyDraft());
+    setAddPanelOpen(true);
+    setAiPurpose("");
+    setAiResources("");
+    setAiDone("");
+
+    const aiConfig = getAiPromptConfig(config.aiPromptTooling);
+
+    if (aiPromptIsEnabled(config.aiPromptTooling) && aiConfig.defaultToolLink) {
+      setNewDraft((current) => ({
+        ...current,
+        [aiConfig.linkFieldKey || "ai_prompt_tool_link"]: aiConfig.defaultToolLink || "",
+      }));
+    }
+  }
+
+  // MasterManager add query support
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams(window.location.search);
+
+    if (params.get("add") === "1") {
+      window.history.replaceState(null, "", window.location.pathname);
+      openAddPanel();
+    }
+  }, []);
+
+
+  async function addRecord() {
+    setMessage("");
+    setErrorMessage("");
+
+    const missingField = config.fields.find(
+      (field) =>
+        field.required &&
+        field.showInAddForm !== false &&
+        !newDraft[field.key]?.trim()
+    );
+
+    if (missingField) {
+      setErrorMessage(`${missingField.label} is required.`);
+      return;
+    }
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .insert(convertDraftToPayload(newDraft));
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Record added.");
+    setNewDraft(createEmptyDraft());
+    setAddPanelOpen(false);
+    await loadRows();
+  }
+
+  function startEditing(row: RowData) {
+    const rowId = row[config.primaryKey];
+
+    if (rowId === null || rowId === undefined) return;
+
+    setEditingRowId(rowId as string | number);
+    setEditDraft(rowToDraft(row));
+    setRowActionMenuId(null);
+    setMessage("");
+    setErrorMessage("");
+  }
+
+  function cancelEditing() {
+    setEditingRowId(null);
+    setEditDraft(createEmptyDraft());
+  }
+
+  async function saveInlineRecord(rowId: string | number) {
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .update(convertDraftToPayload(editDraft))
+      .eq(config.primaryKey, rowId);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Record updated.");
+    setEditingRowId(null);
+    await loadRows();
+  }
+
+  function openRecord(row: RowData) {
+    const rowId = row[config.primaryKey];
+
+    if (rowId === null || rowId === undefined) return;
+
+    setOpenRecordId(rowId as string | number);
+    setRecordDraft(rowToDraft(row));
+    setRowActionMenuId(null);
+    setMessage("");
+    setErrorMessage("");
+  }
+
+  function closeRecord() {
+    setOpenRecordId(null);
+    setRecordDraft(createEmptyDraft());
+  }
+
+  async function saveOpenRecord() {
+    if (openRecordId === null) return;
+
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .update(convertDraftToPayload(recordDraft))
+      .eq(config.primaryKey, openRecordId);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Record updated.");
+    setOpenRecordId(null);
+    await loadRows();
+  }
+
+  function buildDuplicatePayload(row: RowData) {
+    const payload: RowData = {};
+
+    config.fields.forEach((field) => {
+      if (field.showInDatabasePayload === false) return;
+      if (field.type === "smart_due_date") return;
+      if (field.key === config.primaryKey) return;
+
+      const value = row[field.key];
+
+      if (value === undefined) return;
+
+      payload[field.key] = value;
+    });
+
+    return payload;
+  }
+
+  async function duplicateRecord(row: RowData) {
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .insert(buildDuplicatePayload(row));
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Record duplicated.");
+    setRowActionMenuId(null);
+    await loadRows();
+  }
+
+  async function deleteRecord(row: RowData) {
+    const rowId = row[config.primaryKey];
+
+    if (rowId === null || rowId === undefined) return;
+
+    const confirmed = window.confirm("Delete this record? This cannot be undone.");
+
+    if (!confirmed) return;
+
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .delete()
+      .eq(config.primaryKey, rowId as string | number);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Record deleted.");
+    setRowActionMenuId(null);
+    setSelectedRowIds((current) => current.filter((id) => id !== String(rowId)));
+    await loadRows();
+  }
+
+  async function bulkDeleteRecords() {
+    const selectedRows = getSelectedRows();
+
+    if (selectedRows.length === 0) return;
+
+    const confirmed = window.confirm(
+      `Delete ${selectedRows.length} selected record(s)? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    const ids = selectedRows
+      .map((row) => row[config.primaryKey])
+      .filter((id): id is string | number => typeof id === "string" || typeof id === "number");
+
+    if (ids.length === 0) return;
+
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from(config.tableName)
+      .delete()
+      .in(config.primaryKey, ids);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage(`${selectedRows.length} record(s) deleted.`);
+    setSelectedRowIds([]);
+    await loadRows();
+  }
+
+  async function bulkDuplicateRecords() {
+    const selectedRows = getSelectedRows();
+
+    if (selectedRows.length === 0) return;
+
+    const confirmed = window.confirm(
+      `Duplicate ${selectedRows.length} selected record(s)?`
+    );
+
+    if (!confirmed) return;
+
+    setMessage("");
+    setErrorMessage("");
+
+    const payloads = selectedRows.map(buildDuplicatePayload);
+
+    const supabase = createClient();
+
+    const { error } = await supabase.from(config.tableName).insert(payloads);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage(`${selectedRows.length} record(s) duplicated.`);
+    setSelectedRowIds([]);
+    await loadRows();
+  }
+
+  function getExportFields() {
+    return config.fields.filter((field) => {
+      if (field.showInDatabasePayload === false) return false;
+      if (field.type === "smart_due_date") return false;
+      return true;
+    });
+  }
+
+  function exportCsv() {
+    const fields = getExportFields();
+    const headers = fields.map((field) => field.key);
+    const csvRows = rows.map((row) =>
+      fields.map((field) => escapeCsvValue(row[field.key])).join(",")
+    );
+
+    const csv = [headers.join(","), ...csvRows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `${config.tableName}-export.csv`;
+    link.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  async function importCsv(file: File) {
+    setMessage("");
+    setErrorMessage("");
+
+    const text = await file.text();
+    const parsed = parseCsv(text);
+
+    if (parsed.rows.length === 0) {
+      setErrorMessage("No rows found in the CSV file.");
+      return;
+    }
+
+    const fields = getExportFields();
+
+    const payloads = parsed.rows.map((csvRow) => {
+      const draft: DraftData = {};
+
+      fields.forEach((field) => {
+        const matchingHeader =
+          parsed.headers.find(
+            (header) =>
+              header.toLowerCase() === field.key.toLowerCase() ||
+              header.toLowerCase() === field.label.toLowerCase()
+          ) || "";
+
+        draft[field.key] = matchingHeader ? csvRow[matchingHeader] || "" : "";
+      });
+
+      return convertDraftToPayload(draft);
+    });
+
+    const supabase = createClient();
+
+    const { error } = await supabase.from(config.tableName).insert(payloads);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage(`${payloads.length} record(s) imported.`);
+    await loadRows();
+  }
+
+  function getCopyableFields() {
+    return config.fields.filter((field) => {
+      if (nonCopyableRecurringFields.has(field.key)) return false;
+      if (field.showInDatabasePayload === false) return false;
+      if (field.key === config.primaryKey) return false;
+      return true;
+    });
+  }
+
+  function getDefaultCopyFieldKeys() {
+    return getCopyableFields()
+      .map((field) => field.key)
+      .join(",");
+  }
+
+  function getSelectedCopyFields(value: string) {
+    if (!value || value === "All Fields") return getDefaultCopyFieldKeys();
+    if (value === "__NONE__") return "";
+    return value;
+  }
+
+  function copyFieldIsSelected(fieldKey: string) {
+    const keys = dueDateModal.field?.smartDueDateKeys;
+
+    if (!keys) return false;
+
+    const currentText = getSelectedCopyFields(
+      dueDateDraft[keys.recurrenceFieldsToCopy] || ""
+    );
+
+    return currentText
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .includes(fieldKey);
+  }
+
+  function toggleCopyField(fieldKey: string) {
+    const keys = dueDateModal.field?.smartDueDateKeys;
+
+    if (!keys) return;
+
+    const currentText = getSelectedCopyFields(
+      dueDateDraft[keys.recurrenceFieldsToCopy] || ""
+    );
+
+    const current = currentText
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    const next = current.includes(fieldKey)
+      ? current.filter((item) => item !== fieldKey)
+      : [...current, fieldKey];
+
+    updateDueDateDraft(
+      keys.recurrenceFieldsToCopy,
+      next.length === 0 ? "__NONE__" : next.join(",")
+    );
+  }
+
+  function getSmartDueDateTextFromSource(
+    source: DraftData | RowData,
+    field: ManagerField
+  ) {
+    const keys = field.smartDueDateKeys;
+
+    if (!keys) return "Set due date";
+
+    const dueDate = source[keys.dueDate];
+    const dueTime = source[keys.dueTime];
+    const dueDateType = source[keys.dueDateType] || "Standard";
+    const recurrenceFrequency = source[keys.recurrenceFrequency];
+    const recurrenceInterval = source[keys.recurrenceInterval] || "1";
+    const recurrenceMonthlyRule = source[keys.recurrenceMonthlyRule];
+    const recurrenceDays = source[keys.recurrenceDays];
+
+    if (!dueDate) return "Set due date";
+
+    const dateText = String(dueDate);
+    const timeText = dueTime ? ` at ${String(dueTime).slice(0, 5)}` : "";
+
+    if (dueDateType === "Repeating") {
+      let repeatText = "repeats";
+
+      if (recurrenceFrequency === "Custom") {
+        repeatText = `repeats every ${recurrenceInterval} ${recurrenceDays || "Weeks"}`;
+      } else if (recurrenceFrequency === "Monthly") {
+        repeatText = `repeats ${recurrenceMonthlyRule || "Monthly"}`;
+      } else if (recurrenceFrequency === "Weekly") {
+        repeatText = `repeats weekly on ${recurrenceDays || "Monday"}`;
+      } else if (recurrenceFrequency === "Daily") {
+        repeatText = `repeats ${recurrenceDays || "Every Day"}`;
+      }
+
+      return `${dateText}${timeText} · ${repeatText}`;
+    }
+
+    return `${dateText}${timeText}`;
+  }
+
+  function openDueDateModal(field: ManagerField, target: DraftTarget) {
+    const draft = getDraftByTarget(target);
+    const keys = field.smartDueDateKeys;
+
+    if (!keys) return;
+
+    const nextDueDateDraft: DraftData = {
+      [keys.dueDateType]: draft[keys.dueDateType] || "Standard",
+      [keys.dueDate]: draft[keys.dueDate] || "",
+      [keys.dueTime]: draft[keys.dueTime] || "",
+      [keys.recurrenceFrequency]: draft[keys.recurrenceFrequency] || "Daily",
+      [keys.recurrenceInterval]: draft[keys.recurrenceInterval] || "1",
+      [keys.recurrenceDays]: draft[keys.recurrenceDays] || "Every Day",
+      [keys.recurrenceMonthlyRule]:
+        draft[keys.recurrenceMonthlyRule] || "Same Day of Month",
+      [keys.skipWeekends]: draft[keys.skipWeekends] || "false",
+      [keys.createNextWhen]: draft[keys.createNextWhen] || "Complete",
+      [keys.recurrenceEndDate]: draft[keys.recurrenceEndDate] || "",
+      [keys.nextTaskStatus]: draft[keys.nextTaskStatus] || "To Do",
+      [keys.recurrenceFieldsToCopy]:
+        draft[keys.recurrenceFieldsToCopy] || getDefaultCopyFieldKeys(),
+    };
+
+    setDueDateDraft(nextDueDateDraft);
+
+    const selectedDate = nextDueDateDraft[keys.dueDate];
+
+    if (selectedDate) {
+      setCalendarMonth(new Date(`${selectedDate}T12:00:00`));
+    } else {
+      setCalendarMonth(new Date());
+    }
+
+    setDueDateModal({
+      open: true,
+      target,
+      field,
+    });
+  }
+
+  function closeDueDateModal() {
+    setDueDateModal({
+      open: false,
+      target: "new",
+      field: null,
+    });
+    setDueDateDraft({});
+  }
+
+  function saveDueDateModal() {
+    if (!dueDateModal.field?.smartDueDateKeys) return;
+
+    const keys = dueDateModal.field.smartDueDateKeys;
+    const finalDraft = { ...dueDateDraft };
+
+    if (finalDraft[keys.dueDateType] === "Repeating") {
+      if (!finalDraft[keys.dueDate]) {
+        setErrorMessage("Choose a start date for the repeating task.");
+        return;
+      }
+
+      if (!finalDraft[keys.recurrenceFrequency]) {
+        finalDraft[keys.recurrenceFrequency] = "Daily";
+      }
+
+      if (!finalDraft[keys.recurrenceInterval]) {
+        finalDraft[keys.recurrenceInterval] = "1";
+      }
+
+      if (!finalDraft[keys.createNextWhen]) {
+        finalDraft[keys.createNextWhen] = "Complete";
+      }
+
+      if (!finalDraft[keys.nextTaskStatus]) {
+        finalDraft[keys.nextTaskStatus] = "To Do";
+      }
+    }
+
+    updateDraftTarget(dueDateModal.target, finalDraft);
+    closeDueDateModal();
+  }
+
+  function updateDueDateDraft(key: string, value: string) {
+    setDueDateDraft((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
+  function formatDateForCalendar(date: Date) {
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  }
+
+  function getCalendarDays() {
+    const year = calendarMonth.getFullYear();
+    const month = calendarMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const startDay = firstDay.getDay();
+    const totalDays = new Date(year, month + 1, 0).getDate();
+
+    const blanks = Array.from({ length: startDay }, () => null);
+    const days = Array.from({ length: totalDays }, (_, index) => index + 1);
+
+    return [...blanks, ...days];
+  }
+
+  async function openLinkedRecord(field: ManagerField, value: string | number | boolean | null) {
+    if (!field.linkedRecord || value === null || value === undefined || value === "") {
+      return;
+    }
+
+    setLinkedRecordModal({
+      open: true,
+      config: field.linkedRecord,
+      record: null,
+      loading: true,
+      error: "",
+    });
+
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from(field.linkedRecord.tableName)
+      .select("*")
+      .eq(field.linkedRecord.primaryKey, value as string | number)
+      .single();
+
+    if (error) {
+      setLinkedRecordModal({
+        open: true,
+        config: field.linkedRecord,
+        record: null,
+        loading: false,
+        error: error.message,
+      });
+      return;
+    }
+
+    setLinkedRecordModal({
+      open: true,
+      config: field.linkedRecord,
+      record: (data as RowData) || null,
+      loading: false,
+      error: "",
+    });
+  }
+
+  function closeLinkedRecord() {
+    setLinkedRecordModal({
+      open: false,
+      config: null,
+      record: null,
+      loading: false,
+      error: "",
+    });
+  }
+
+  function getLinkedRecordButtonLabel(row: RowData, field: ManagerField) {
+    const value = row[field.key];
+
+    if (value === null || value === undefined || value === "") return "—";
+
+    return `Open ${field.linkedRecord?.title || "record"} #${value}`;
+  }
+
+  function selectedOptionDescription(field: ManagerField, value: string) {
+    if (!field.options || !value) return "";
+
+    const option = field.options.map(normalizeOption).find((item) => item.value === value);
+
+    return option?.description || "";
+  }
+
+  function renderInput(
+    field: ManagerField,
+    value: string,
+    onChange: (value: string) => void,
+    target: DraftTarget,
+    compact = false
+  ) {
+    const inputStyle = compact ? smallInputStyle : formInputStyle;
+
+    if (field.type === "smart_due_date") {
+      return renderSmartDueDateButton(field, getDraftByTarget(target), target, compact);
+    }
+
+    if (field.type === "textarea") {
+      return (
+        <textarea
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={compact ? tableTextareaStyle : formTextareaStyle}
+        />
+      );
+    }
+
+    if (field.type === "select") {
+      const options = (field.options || []).map(normalizeOption);
+      const help = selectedOptionDescription(field, value);
+
+      return (
+        <>
+          <select
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            style={inputStyle}
+          >
+            <option value="">Select {field.label}</option>
+            {options.map((option) => (
+              <option
+                key={option.value}
+                value={option.value}
+                title={option.description || option.label}
+              >
+                {option.label}
+              </option>
+            ))}
+          </select>
+          {help ? <small style={optionHelpStyle}>{help}</small> : null}
+        </>
+      );
+    }
+
+    if (field.type === "employee") {
+      return (
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={inputStyle}
+        >
+          <option value="">Unassigned</option>
+          {employees.map((employee) => (
+            <option key={employee.id} value={employee.id}>
+              {employee.name || `Employee #${employee.id}`}
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    if (field.type === "boolean") {
+      return (
+        <select
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={inputStyle}
+        >
+          <option value="">Select</option>
+          <option value="true">Yes</option>
+          <option value="false">No</option>
+        </select>
+      );
+    }
+
+    if (field.type === "date") {
+      return (
+        <input
+          type="date"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={inputStyle}
+        />
+      );
+    }
+
+    if (field.type === "number" || field.type === "currency") {
+      return (
+        <input
+          type="number"
+          step={field.type === "currency" ? "0.01" : "1"}
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={inputStyle}
+        />
+      );
+    }
+
+    if (field.type === "url") {
+      return (
+        <input
+          type="url"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          style={inputStyle}
+        />
+      );
+    }
+
+    return (
+      <input
+        type="text"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        style={inputStyle}
+      />
+    );
+  }
+
+  function renderSmartDueDateButton(
+    field: ManagerField,
+    source: DraftData | RowData,
+    target: DraftTarget,
+    compact = false
+  ) {
+    const text = getSmartDueDateTextFromSource(source, field);
+    const keys = field.smartDueDateKeys;
+    const typeText = keys ? String(source[keys.dueDateType] || "Standard") : "Standard";
+
+    return (
+      <button
+        type="button"
+        onClick={() => openDueDateModal(field, target)}
+        style={compact ? smartDueDateCompactButtonStyle : smartDueDateButtonStyle}
+      >
+        <span>{text}</span>
+        <strong style={miniPillStyle}>{typeText}</strong>
+      </button>
+    );
+  }
+
+  function formatValue(value: string | number | boolean | null, field?: ManagerField) {
+    if (value === null || value === undefined || value === "") return "—";
+
+    if (field?.type === "currency") return `$${Number(value || 0).toFixed(2)}`;
+
+    if (field?.type === "date") {
+      const text = String(value);
+      return text.includes("T") ? text.split("T")[0] : text;
+    }
+
+    if (field?.type === "employee") return getEmployeeName(value);
+    if (field?.type === "boolean") return value ? "Yes" : "No";
+
+    if (field?.type === "url") {
+      return (
+        <a href={String(value)} target="_blank" rel="noopener noreferrer">
+          Open
+        </a>
+      );
+    }
+
+    return String(value);
+  }
+
+  function renderCell(row: RowData, field: ManagerField) {
+    const rowId = row[config.primaryKey];
+    const isEditing = editingRowId === rowId;
+
+    if (isEditing) {
+      return renderInput(
+        field,
+        editDraft[field.key] || "",
+        (value) => updateEditDraft(field.key, value),
+        "edit",
+        true
+      );
+    }
+
+    if (field.type === "smart_due_date") {
+      return (
+        <button
+          type="button"
+          onClick={() => openRecord(row)}
+          style={smartDueDateCompactButtonStyle}
+        >
+          <span>{getSmartDueDateTextFromSource(row, field)}</span>
+          <strong style={miniPillStyle}>
+            {String(row[field.smartDueDateKeys?.dueDateType || ""] || "Standard")}
+          </strong>
+        </button>
+      );
+    }
+
+    if (field.linkedRecord) {
+      return (
+        <button
+          type="button"
+          onClick={() => openLinkedRecord(field, row[field.key])}
+          style={linkedRecordButtonStyle}
+        >
+          {getLinkedRecordButtonLabel(row, field)}
+        </button>
+      );
+    }
+
+    return formatValue(row[field.key], field);
+  }
+
+  const visibleFieldConfigs = useMemo(() => {
+    return visibleFields
+      .map((fieldKey) => getField(fieldKey))
+      .filter(Boolean) as ManagerField[];
+  }, [visibleFields, config.fields]);
+
+  const availableFieldConfigs = useMemo(() => {
+    const search = fieldSearch.trim().toLowerCase();
+
+    return config.fields.filter((field) => {
+      if (visibleFields.includes(field.key)) return false;
+
+      if (!search) return true;
+
+      return (
+        field.label.toLowerCase().includes(search) ||
+        field.key.toLowerCase().includes(search) ||
+        field.type.toLowerCase().includes(search) ||
+        (field.description || "").toLowerCase().includes(search)
+      );
+    });
+  }, [visibleFields, fieldSearch, config.fields]);
+
+  function getSearchableValue(row: RowData, field: ManagerField) {
+    if (field.type === "smart_due_date") {
+      return getSmartDueDateTextFromSource(row, field).toLowerCase();
+    }
+
+    if (field.type === "employee") {
+      return getEmployeeName(row[field.key]).toLowerCase();
+    }
+
+    if (field.type === "boolean") {
+      return row[field.key] ? "yes" : "no";
+    }
+
+    return String(row[field.key] || "").toLowerCase();
+  }
+
+  function compareRows(a: RowData, b: RowData) {
+    const field = getField(sortBy);
+
+    if (!field) return 0;
+
+    const first =
+      field.type === "smart_due_date" && field.smartDueDateKeys
+        ? a[field.smartDueDateKeys.dueDate]
+        : a[field.key];
+
+    const second =
+      field.type === "smart_due_date" && field.smartDueDateKeys
+        ? b[field.smartDueDateKeys.dueDate]
+        : b[field.key];
+
+    let result = 0;
+
+    const customOrder = field.sortOrder || [];
+
+    if (customOrder.length > 0) {
+      const firstIndex = customOrder.indexOf(String(first));
+      const secondIndex = customOrder.indexOf(String(second));
+
+      result =
+        (firstIndex === -1 ? 999 : firstIndex) -
+        (secondIndex === -1 ? 999 : secondIndex);
+    } else if (field.type === "number" || field.type === "currency") {
+      result = Number(second || 0) - Number(first || 0);
+    } else {
+      result = String(first || "").localeCompare(String(second || ""));
+    }
+
+    return sortReverse ? result * -1 : result;
+  }
+
+  const filteredRows = useMemo(() => {
+    let nextRows = [...rows];
+
+    if (searchText.trim()) {
+      const lowered = searchText.toLowerCase();
+
+      nextRows = nextRows.filter((row) =>
+        config.fields.some((field) => getSearchableValue(row, field).includes(lowered))
+      );
+    }
+
+    filters.forEach((filter) => {
+      if (!filter.value.trim()) return;
+
+      const field = getField(filter.fieldKey);
+
+      if (!field) return;
+
+      nextRows = nextRows.filter((row) =>
+        getSearchableValue(row, field).includes(filter.value.toLowerCase())
+      );
+    });
+
+    if (sortBy) {
+      nextRows.sort(compareRows);
+    }
+
+    return nextRows;
+  }, [rows, searchText, filters, sortBy, sortReverse, employees, config.fields]);
+
+  const groupedRows = useMemo(() => {
+    if (!groupBy) {
+      return [{ groupName: "All Records", items: filteredRows }];
+    }
+
+    const field = getField(groupBy);
+    const groups: Record<string, RowData[]> = {};
+
+    filteredRows.forEach((row) => {
+      let groupName = "Not Set";
+
+      if (field?.type === "employee") {
+        groupName = getEmployeeName(row[groupBy]);
+      } else if (field?.type === "boolean") {
+        groupName = row[groupBy] ? "Yes" : "No";
+      } else if (field?.type === "smart_due_date") {
+        groupName = getSmartDueDateTextFromSource(row, field);
+      } else {
+        const value = row[groupBy];
+        groupName =
+          value !== null && value !== undefined && String(value).trim()
+            ? String(value)
+            : "Not Set";
+      }
+
+      if (!groups[groupName]) groups[groupName] = [];
+      groups[groupName].push(row);
+    });
+
+    return Object.entries(groups).map(([groupName, items]) => ({
+      groupName,
+      items,
+    }));
+  }, [filteredRows, groupBy, employees]);
+
+  const metrics = useMemo(() => {
+    if (config.metrics && config.metrics.length > 0) {
+      return config.metrics.slice(0, 4);
+    }
+
+    return [
+      {
+        label: "Records Loaded",
+        description: "Total records loaded for this manager.",
+        getValue: (metricRows: RowData[]) => metricRows.length,
+      },
+      {
+        label: "Selected",
+        description: "Rows currently selected for bulk actions.",
+        getValue: () => selectedRowIds.length,
+      },
+      {
+        label: "Visible Now",
+        description: "Rows visible after search and filters.",
+        getValue: () => filteredRows.length,
+      },
+      {
+        label: "Needs Setup",
+        description: "Custom KPIs have not been added for this manager yet.",
+        getValue: () => "—",
+      },
+    ];
+  }, [config.metrics, selectedRowIds.length, filteredRows.length]);
+
+  const filteredRowIds = filteredRows.map(getRowId).filter(Boolean);
+  const allVisibleSelected =
+    filteredRowIds.length > 0 &&
+    filteredRowIds.every((id) => selectedRowIds.includes(id));
+
+  function addFilter() {
+    const firstField = config.fields[0];
+
+    if (!firstField) return;
+
+    setFilters((current) => [
+      ...current,
+      {
+        id: Date.now(),
+        fieldKey: firstField.key,
+        value: "",
+      },
+    ]);
+  }
+
+  function updateFilter(id: number, update: Partial<ActiveFilter>) {
+    setFilters((current) =>
+      current.map((filter) =>
+        filter.id === id
+          ? {
+              ...filter,
+              ...update,
+            }
+          : filter
+      )
+    );
+  }
+
+  function removeFilter(id: number) {
+    setFilters((current) => current.filter((filter) => filter.id !== id));
+  }
+
+  function generatedAiDescription() {
+    return `What is the purpose of the task?
+${aiPurpose || ""}
+
+What resources are needed to complete this task?
+${aiResources || ""}
+
+How do we know the task is done?
+${aiDone || ""}`;
+  }
+
+  function useAiDescription() {
+    const aiConfig = getAiPromptConfig(config.aiPromptTooling);
+    updateNewDraft(aiConfig.descriptionFieldKey || "description", generatedAiDescription());
+    setAiPromptOpen(false);
+  }
+
+  return (
+    <main
+      style={pageShellStyle}
+      onClick={() => {
+        setActiveMenu(null);
+        setRowActionMenuId(null);
+      }}
+    >
+      <section style={headerStyle}>
+        <div>
+          <a href={config.backPath} style={backLinkStyle}>
+            ← Back
+          </a>
+
+          <div style={eyebrowStyle}>{config.eyebrow}</div>
+          <h1 style={titleStyle}>{config.title}</h1>
+          <p style={descriptionStyle}>{config.description}</p>
+        </div>
+
+        <div style={headerButtonStackStyle}>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              openAddPanel();
+            }}
+            style={primaryButtonStyle}
+          >
+            {config.addButtonLabel}
+          </button>
+
+          <div style={buttonRowStyle}>
+            <button
+              type="button"
+              onClick={exportCsv}
+              style={secondaryButtonStyle}
+            >
+              Export CSV
+            </button>
+
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              style={secondaryButtonStyle}
+            >
+              Import CSV
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              style={{ display: "none" }}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+
+                if (file) {
+                  importCsv(file);
+                  event.target.value = "";
+                }
+              }}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section style={summaryGridStyle}>
+        {metrics.map((metric) => (
+          <div key={metric.label} style={summaryCardStyle} title={metric.description}>
+            <div style={summaryLabelStyle}>{metric.label}</div>
+            <div style={summaryValueStyle}>{metric.getValue(rows)}</div>
+            <div style={summaryDescriptionStyle}>{metric.description}</div>
+          </div>
+        ))}
+      </section>
+
+      {message ? <div style={successBoxStyle}>{message}</div> : null}
+      {errorMessage ? <div style={errorBoxStyle}>{errorMessage}</div> : null}
+
+      {addPanelOpen ? (
+        <section style={panelStyle} onClick={(event) => event.stopPropagation()}>
+          <div style={panelHeaderStyle}>
+            <div>
+              <div style={panelLabelStyle}>ADD RECORD</div>
+              <h2 style={panelTitleStyle}>{config.addButtonLabel}</h2>
+            </div>
+
+            <div style={buttonRowStyle}>
+              {aiPromptIsEnabled(config.aiPromptTooling) ? (
+                <button
+                  type="button"
+                  onClick={() => setAiPromptOpen(true)}
+                  style={secondaryButtonStyle}
+                >
+                  AI Prompt Tooling
+                </button>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={() => setAddPanelOpen(false)}
+                style={secondaryButtonStyle}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+
+          <div style={formGridStyle}>
+            {config.fields
+              .filter((field) => field.showInAddForm !== false)
+              .map((field) => (
+                <label key={field.key} style={formLabelStyle}>
+                  {labelWithInfo(field)}
+                  {field.description ? (
+                    <small style={fieldDescriptionStyle}>{field.description}</small>
+                  ) : null}
+                  {renderInput(
+                    field,
+                    newDraft[field.key] || "",
+                    (value) => updateNewDraft(field.key, value),
+                    "new"
+                  )}
+                </label>
+              ))}
+          </div>
+
+          <div style={buttonRowStyle}>
+            <button type="button" onClick={addRecord} style={saveButtonStyle}>
+              Save Record
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setAddPanelOpen(false)}
+              style={secondaryButtonStyle}
+            >
+              Cancel
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      <section style={tableCardStyle}>
+        <div style={toolbarStyle} onClick={(event) => event.stopPropagation()}>
+          <button
+            type="button"
+            onClick={() => setActiveMenu(activeMenu === "fields" ? null : "fields")}
+            style={toolbarButtonStyle}
+          >
+            Fields <strong style={pillStyle}>{visibleFields.length}</strong>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveMenu(activeMenu === "sort" ? null : "sort")}
+            style={toolbarButtonStyle}
+          >
+            Sort
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveMenu(activeMenu === "filter" ? null : "filter")}
+            style={toolbarButtonStyle}
+          >
+            Filter <strong style={pillStyle}>{filters.length}</strong>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveMenu(activeMenu === "group" ? null : "group")}
+            style={toolbarButtonStyle}
+          >
+            Group
+          </button>
+
+          <div style={findBoxStyle}>
+            <span>⌕</span>
+            <input
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Find"
+              style={searchInputStyle}
+            />
+          </div>
+
+          <button type="button" onClick={loadRows} style={refreshButtonStyle}>
+            Refresh
+          </button>
+        </div>
+
+        {selectedRowIds.length > 0 ? (
+          <div style={bulkToolbarStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={bulkTextStyle}>
+              <strong>{selectedRowIds.length}</strong> selected
+            </div>
+
+            <div style={buttonRowStyle}>
+              <button
+                type="button"
+                onClick={bulkDuplicateRecords}
+                style={secondaryButtonStyle}
+              >
+                Bulk Duplicate
+              </button>
+
+              <button
+                type="button"
+                onClick={bulkDeleteRecords}
+                style={deleteButtonStyle}
+              >
+                Bulk Delete
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedRowIds([])}
+                style={secondaryButtonStyle}
+              >
+                Clear Selection
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {activeMenu === "fields" ? (
+          <div style={floatingPanelStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={floatingHeaderStyle}>
+              <div>
+                <div style={floatingLabelSmallStyle}>FIELDS TO DISPLAY</div>
+                <div style={floatingTitleStyle}>Build This View</div>
+              </div>
+
+              <div style={buttonRowStyle}>
+                <button
+                  type="button"
+                  onClick={() => setVisibleFields(config.fields.map((field) => field.key))}
+                  style={secondaryButtonStyle}
+                >
+                  Select All
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVisibleFields(config.defaultVisibleFields)}
+                  style={secondaryButtonStyle}
+                >
+                  Default View
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setVisibleFields([])}
+                  style={secondaryButtonStyle}
+                >
+                  Clear All
+                </button>
+              </div>
+            </div>
+
+            <div style={viewTwoColumnStyle}>
+              <div style={viewColumnStyle}>
+                <strong>Available Fields</strong>
+
+                <div style={fieldSearchBoxStyle}>
+                  <span>⌕</span>
+                  <input
+                    value={fieldSearch}
+                    onChange={(event) => setFieldSearch(event.target.value)}
+                    placeholder="Search fields"
+                    style={searchInputStyle}
+                  />
+                </div>
+
+                <div style={fieldListStyle}>
+                  {availableFieldConfigs.map((field) => (
+                    <button
+                      type="button"
+                      key={field.key}
+                      onClick={() =>
+                        setVisibleFields((current) => [...current, field.key])
+                      }
+                      style={availableFieldItemStyle}
+                    >
+                      <span>
+                        <strong>{field.label}</strong>
+                        <small style={fieldMetaStyle}>{field.description || field.type}</small>
+                      </span>
+                      <span style={addArrowStyle}>+</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div style={viewColumnStyle}>
+                <strong>Selected Fields</strong>
+
+                <div style={fieldListStyle}>
+                  {visibleFieldConfigs.map((field) => (
+                    <div key={field.key} style={selectedFieldItemStyle}>
+                      <div style={{ flex: 1 }}>
+                        <strong>{field.label}</strong>
+                        <small style={fieldMetaStyle}>{field.description || field.type}</small>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setVisibleFields((current) =>
+                            current.filter((key) => key !== field.key)
+                          )
+                        }
+                        style={smallRemoveButtonStyle}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {activeMenu === "sort" ? (
+          <div style={smallFloatingPanelStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={floatingLabelSmallStyle}>SORT</div>
+
+            <label style={floatingLabelStyle}>
+              Field
+              <select
+                value={sortBy}
+                onChange={(event) => setSortBy(event.target.value)}
+                style={floatingInputStyle}
+              >
+                {config.fields.map((field) => (
+                  <option key={field.key} value={field.key}>
+                    {field.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={repeatCheckLabelStyle}>
+              <input
+                type="checkbox"
+                checked={sortReverse}
+                onChange={(event) => setSortReverse(event.target.checked)}
+              />
+              Reverse order
+            </label>
+          </div>
+        ) : null}
+
+        {activeMenu === "filter" ? (
+          <div style={floatingPanelStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={floatingHeaderStyle}>
+              <div>
+                <div style={floatingLabelSmallStyle}>FILTER</div>
+                <div style={floatingTitleStyle}>Filter Records</div>
+              </div>
+
+              <div style={buttonRowStyle}>
+                <button type="button" onClick={addFilter} style={secondaryButtonStyle}>
+                  + Add Filter
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setFilters([])}
+                  style={secondaryButtonStyle}
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+
+            <div style={filterStackStyle}>
+              {filters.map((filter) => (
+                <div key={filter.id} style={filterRowStyle}>
+                  <label style={floatingLabelStyle}>
+                    Field
+                    <select
+                      value={filter.fieldKey}
+                      onChange={(event) =>
+                        updateFilter(filter.id, { fieldKey: event.target.value })
+                      }
+                      style={floatingInputStyle}
+                    >
+                      {config.fields.map((field) => (
+                        <option key={field.key} value={field.key}>
+                          {field.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <label style={floatingLabelStyle}>
+                    Contains
+                    <input
+                      value={filter.value}
+                      onChange={(event) =>
+                        updateFilter(filter.id, { value: event.target.value })
+                      }
+                      style={floatingInputStyle}
+                    />
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={() => removeFilter(filter.id)}
+                    style={deleteButtonStyle}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+
+              {filters.length === 0 ? (
+                <div style={emptyStateSmallStyle}>No filters yet.</div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+
+        {activeMenu === "group" ? (
+          <div style={smallFloatingPanelStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={floatingLabelSmallStyle}>GROUP</div>
+
+            <label style={floatingLabelStyle}>
+              Field
+              <select
+                value={groupBy}
+                onChange={(event) => setGroupBy(event.target.value)}
+                style={floatingInputStyle}
+              >
+                <option value="">No grouping</option>
+                {config.fields.map((field) => (
+                  <option key={field.key} value={field.key}>
+                    {field.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        ) : null}
+
+        {loading ? <div style={loadingStyle}>Loading records...</div> : null}
+
+        {!loading ? (
+          <div style={tableWrapStyle}>
+            <table style={tableStyle}>
+              <thead>
+                <tr>
+                  <th style={checkboxHeaderStyle}>
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={selectAllVisibleRows}
+                      aria-label="Select all visible rows"
+                    />
+                  </th>
+
+                  <th style={accentHeaderStyle}></th>
+
+                  {visibleFieldConfigs.map((field) => (
+                    <th key={field.key} style={thStyle} title={getFieldDescription(field)}>
+                      {field.label}
+                    </th>
+                  ))}
+
+                  <th style={thStyle}>Actions</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {groupedRows.map((group) => (
+                  <Fragment key={group.groupName}>
+                    {groupBy ? (
+                      <tr>
+                        <td
+                          colSpan={visibleFieldConfigs.length + 3}
+                          style={groupRowStyle}
+                        >
+                          {group.groupName} ({group.items.length})
+                        </td>
+                      </tr>
+                    ) : null}
+
+                    {group.items.map((row, index) => {
+                      const rowId = row[config.primaryKey];
+                      const isEditing = editingRowId === rowId;
+
+                      return (
+                        <tr key={`${rowId || index}-${index}`} style={trStyle}>
+                          <td style={checkboxCellStyle}>
+                            <input
+                              type="checkbox"
+                              checked={rowIsSelected(row)}
+                              onChange={() => toggleRowSelection(row)}
+                              aria-label="Select row"
+                            />
+                          </td>
+
+                          <td style={accentCellStyle}>
+                            <span style={rowAccentStyle}></span>
+                          </td>
+
+                          {visibleFieldConfigs.map((field) => (
+                            <td key={field.key} style={tdStyle}>
+                              {renderCell(row, field)}
+                            </td>
+                          ))}
+
+                          <td style={tdStyle}>
+                            {isEditing ? (
+                              <div style={buttonRowStyle}>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    saveInlineRecord(rowId as string | number)
+                                  }
+                                  style={saveButtonStyle}
+                                >
+                                  Save
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={cancelEditing}
+                                  style={secondaryButtonStyle}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <div
+                                style={actionMenuWrapStyle}
+                                onClick={(event) => event.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setRowActionMenuId(
+                                      rowActionMenuId === rowId
+                                        ? null
+                                        : (rowId as string | number)
+                                    )
+                                  }
+                                  style={actionMenuButtonStyle}
+                                >
+                                  ⋯
+                                </button>
+
+                                {rowActionMenuId === rowId ? (
+                                  <div style={actionDropdownStyle}>
+                                    <button
+                                      type="button"
+                                      onClick={() => openRecord(row)}
+                                      style={actionDropdownButtonStyle}
+                                    >
+                                      Open
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => startEditing(row)}
+                                      style={actionDropdownButtonStyle}
+                                    >
+                                      Inline Edit
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => duplicateRecord(row)}
+                                      style={actionDropdownButtonStyle}
+                                    >
+                                      Duplicate
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => deleteRecord(row)}
+                                      style={actionDropdownDangerButtonStyle}
+                                    >
+                                      Delete
+                                    </button>
+                                  </div>
+                                ) : null}
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+
+            {filteredRows.length === 0 ? (
+              <div style={emptyStateStyle}>No records match this view.</div>
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+
+      {openRecordId !== null ? (
+        <div style={modalBackdropStyle} onClick={closeRecord}>
+          <section style={recordModalStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={modalHeaderStyle}>
+              <div>
+                <div style={floatingLabelSmallStyle}>OPEN RECORD</div>
+                <h2 style={recordTitleStyle}>{config.title}</h2>
+                <p style={recordIntroStyle}>
+                  Edit the record here. Linked fields can open related records in a popup.
+                </p>
+              </div>
+
+              <button type="button" onClick={closeRecord} style={secondaryButtonStyle}>
+                Close
+              </button>
+            </div>
+
+            <div style={recordGridStyle}>
+              {config.fields
+                .filter((field) => field.showInEditForm !== false)
+                .map((field) => (
+                  <label key={field.key} style={formLabelStyle}>
+                    {labelWithInfo(field)}
+                    {field.description ? (
+                      <small style={fieldDescriptionStyle}>{field.description}</small>
+                    ) : null}
+
+                    {field.linkedRecord && recordDraft[field.key] ? (
+                      <button
+                        type="button"
+                        onClick={() => openLinkedRecord(field, recordDraft[field.key])}
+                        style={linkedRecordOpenButtonStyle}
+                      >
+                        Open linked {field.linkedRecord.title} #{recordDraft[field.key]}
+                      </button>
+                    ) : null}
+
+                    {renderInput(
+                      field,
+                      recordDraft[field.key] || "",
+                      (value) => updateRecordDraft(field.key, value),
+                      "record"
+                    )}
+                  </label>
+                ))}
+            </div>
+
+            <div style={buttonRowStyle}>
+              <button type="button" onClick={saveOpenRecord} style={saveButtonStyle}>
+                Save Record
+              </button>
+
+              <button type="button" onClick={closeRecord} style={secondaryButtonStyle}>
+                Cancel
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {linkedRecordModal.open ? (
+        <div style={modalBackdropStyle} onClick={closeLinkedRecord}>
+          <section
+            style={linkedRecordModalStyle}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div style={modalHeaderStyle}>
+              <div>
+                <div style={floatingLabelSmallStyle}>LINKED RECORD</div>
+                <h2 style={recordTitleStyle}>
+                  {linkedRecordModal.config?.title || "Linked Record"}
+                </h2>
+                <p style={recordIntroStyle}>
+                  This is the record connected to the field you clicked.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={closeLinkedRecord}
+                style={secondaryButtonStyle}
+              >
+                Close
+              </button>
+            </div>
+
+            {linkedRecordModal.loading ? (
+              <div style={loadingStyle}>Loading linked record...</div>
+            ) : null}
+
+            {linkedRecordModal.error ? (
+              <div style={errorBoxStyle}>{linkedRecordModal.error}</div>
+            ) : null}
+
+            {linkedRecordModal.record && linkedRecordModal.config ? (
+              <div style={linkedRecordGridStyle}>
+                {(linkedRecordModal.config.fields &&
+                linkedRecordModal.config.fields.length > 0
+                  ? linkedRecordModal.config.fields
+                  : Object.keys(linkedRecordModal.record).map((key) => ({
+                      key,
+                      label: key,
+                    }))
+                ).map((field) => (
+                  <div key={field.key} style={linkedRecordItemStyle}>
+                    <div style={linkedRecordLabelStyle}>{field.label}</div>
+                    <div style={linkedRecordValueStyle}>
+                      {formatLinkedRecordValue(
+                        linkedRecordModal.record?.[field.key] ?? null,
+                        field.type
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
+
+      {dueDateModal.open && dueDateModal.field?.smartDueDateKeys ? (
+        <div style={modalBackdropStyle} onClick={closeDueDateModal}>
+          <section style={dueDateModalStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={repeatPanelStyle}>
+              <div style={repeatHeaderStyle}>
+                <div>
+                  <h2 style={repeatTitleStyle}>Due Date / Repeating Task</h2>
+                  <p style={miniDescriptionStyle}>
+                    Turn this on when the task should create the next task after it is completed.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    const keys = dueDateModal.field?.smartDueDateKeys;
+                    if (!keys) return;
+
+                    updateDueDateDraft(
+                      keys.dueDateType,
+                      dueDateDraft[keys.dueDateType] === "Repeating"
+                        ? "Standard"
+                        : "Repeating"
+                    );
+                  }}
+                  style={{
+                    ...toggleStyle,
+                    ...(dueDateDraft[
+                      dueDateModal.field.smartDueDateKeys.dueDateType
+                    ] === "Repeating"
+                      ? toggleOnStyle
+                      : {}),
+                  }}
+                >
+                  <span
+                    style={{
+                      ...toggleKnobStyle,
+                      ...(dueDateDraft[
+                        dueDateModal.field.smartDueDateKeys.dueDateType
+                      ] === "Repeating"
+                        ? toggleKnobOnStyle
+                        : {}),
+                    }}
+                  />
+                </button>
+              </div>
+
+              <div style={repeatStatusBoxStyle}>
+                Current setting:{" "}
+                <strong>
+                  {dueDateDraft[dueDateModal.field.smartDueDateKeys.dueDateType] ||
+                    "Standard"}
+                </strong>
+              </div>
+
+              <label style={repeatLabelStyle}>
+                Repeats
+                <small style={fieldDescriptionStyle}>
+                  Choose how often the task should repeat.
+                </small>
+                <select
+                  value={
+                    dueDateDraft[
+                      dueDateModal.field.smartDueDateKeys.recurrenceFrequency
+                    ] || "Daily"
+                  }
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    const keys = dueDateModal.field!.smartDueDateKeys!;
+
+                    updateDueDateDraft(keys.recurrenceFrequency, value);
+
+                    if (value === "Custom") {
+                      updateDueDateDraft(keys.recurrenceDays, "Weeks");
+                      updateDueDateDraft(keys.recurrenceInterval, "2");
+                    }
+
+                    if (value === "Daily") {
+                      updateDueDateDraft(keys.recurrenceDays, "Every Day");
+                      updateDueDateDraft(keys.recurrenceInterval, "1");
+                    }
+
+                    if (value === "Weekly") {
+                      updateDueDateDraft(keys.recurrenceDays, "Monday");
+                      updateDueDateDraft(keys.recurrenceInterval, "1");
+                    }
+
+                    if (value === "Monthly") {
+                      updateDueDateDraft(keys.recurrenceMonthlyRule, "Same Day of Month");
+                      updateDueDateDraft(keys.recurrenceInterval, "1");
+                    }
+                  }}
+                  style={formInputStyle}
+                >
+                  <option value="Daily">Daily — repeats by day</option>
+                  <option value="Weekly">Weekly — repeats by week</option>
+                  <option value="Monthly">Monthly — repeats by month</option>
+                  <option value="Custom">Custom — every X days, weeks, or months</option>
+                </select>
+              </label>
+
+              {dueDateDraft[
+                dueDateModal.field.smartDueDateKeys.recurrenceFrequency
+              ] === "Custom" ? (
+                <div style={customRepeatGridStyle}>
+                  <label style={repeatLabelStyle}>
+                    Every
+                    <input
+                      type="number"
+                      min="1"
+                      value={
+                        dueDateDraft[
+                          dueDateModal.field.smartDueDateKeys.recurrenceInterval
+                        ] || "2"
+                      }
+                      onChange={(event) =>
+                        updateDueDateDraft(
+                          dueDateModal.field!.smartDueDateKeys!.recurrenceInterval,
+                          event.target.value
+                        )
+                      }
+                      style={formInputStyle}
+                    />
+                  </label>
+
+                  <label style={repeatLabelStyle}>
+                    Unit
+                    <select
+                      value={
+                        dueDateDraft[
+                          dueDateModal.field.smartDueDateKeys.recurrenceDays
+                        ] || "Weeks"
+                      }
+                      onChange={(event) =>
+                        updateDueDateDraft(
+                          dueDateModal.field!.smartDueDateKeys!.recurrenceDays,
+                          event.target.value
+                        )
+                      }
+                      style={formInputStyle}
+                    >
+                      <option value="Days">Days</option>
+                      <option value="Weeks">Weeks</option>
+                      <option value="Months">Months</option>
+                    </select>
+                  </label>
+                </div>
+              ) : null}
+
+              {dueDateDraft[
+                dueDateModal.field.smartDueDateKeys.recurrenceFrequency
+              ] === "Daily" ? (
+                <label style={repeatLabelStyle}>
+                  Daily Rule
+                  <select
+                    value={
+                      dueDateDraft[
+                        dueDateModal.field.smartDueDateKeys.recurrenceDays
+                      ] || "Every Day"
+                    }
+                    onChange={(event) =>
+                      updateDueDateDraft(
+                        dueDateModal.field!.smartDueDateKeys!.recurrenceDays,
+                        event.target.value
+                      )
+                    }
+                    style={formInputStyle}
+                  >
+                    <option value="Every Day">Every Day</option>
+                    <option value="Weekdays Only">Weekdays Only</option>
+                  </select>
+                </label>
+              ) : null}
+
+              {dueDateDraft[
+                dueDateModal.field.smartDueDateKeys.recurrenceFrequency
+              ] === "Weekly" ? (
+                <label style={repeatLabelStyle}>
+                  Weekly Day
+                  <select
+                    value={
+                      dueDateDraft[
+                        dueDateModal.field.smartDueDateKeys.recurrenceDays
+                      ] || "Monday"
+                    }
+                    onChange={(event) =>
+                      updateDueDateDraft(
+                        dueDateModal.field!.smartDueDateKeys!.recurrenceDays,
+                        event.target.value
+                      )
+                    }
+                    style={formInputStyle}
+                  >
+                    <option value="Monday">Monday</option>
+                    <option value="Tuesday">Tuesday</option>
+                    <option value="Wednesday">Wednesday</option>
+                    <option value="Thursday">Thursday</option>
+                    <option value="Friday">Friday</option>
+                    <option value="Saturday">Saturday</option>
+                    <option value="Sunday">Sunday</option>
+                  </select>
+                </label>
+              ) : null}
+
+              {dueDateDraft[
+                dueDateModal.field.smartDueDateKeys.recurrenceFrequency
+              ] === "Monthly" ? (
+                <label style={repeatLabelStyle}>
+                  Monthly Rule
+                  <select
+                    value={
+                      dueDateDraft[
+                        dueDateModal.field.smartDueDateKeys.recurrenceMonthlyRule
+                      ] || "Same Day of Month"
+                    }
+                    onChange={(event) =>
+                      updateDueDateDraft(
+                        dueDateModal.field!.smartDueDateKeys!.recurrenceMonthlyRule,
+                        event.target.value
+                      )
+                    }
+                    style={formInputStyle}
+                  >
+                    <option value="Same Day of Month">Same Day of Month</option>
+                    <option value="First Monday">First Monday</option>
+                    <option value="First Tuesday">First Tuesday</option>
+                    <option value="First Wednesday">First Wednesday</option>
+                    <option value="First Thursday">First Thursday</option>
+                    <option value="First Friday">First Friday</option>
+                    <option value="Second Monday">Second Monday</option>
+                    <option value="Second Tuesday">Second Tuesday</option>
+                    <option value="Second Wednesday">Second Wednesday</option>
+                    <option value="Second Thursday">Second Thursday</option>
+                    <option value="Second Friday">Second Friday</option>
+                    <option value="Last Monday">Last Monday</option>
+                    <option value="Last Tuesday">Last Tuesday</option>
+                    <option value="Last Wednesday">Last Wednesday</option>
+                    <option value="Last Thursday">Last Thursday</option>
+                    <option value="Last Friday">Last Friday</option>
+                  </select>
+                </label>
+              ) : null}
+
+              <label style={repeatLabelStyle}>
+                Due Time
+                <input
+                  type="time"
+                  value={
+                    dueDateDraft[dueDateModal.field.smartDueDateKeys.dueTime] || ""
+                  }
+                  onChange={(event) =>
+                    updateDueDateDraft(
+                      dueDateModal.field!.smartDueDateKeys!.dueTime,
+                      event.target.value
+                    )
+                  }
+                  style={formInputStyle}
+                />
+              </label>
+
+              <label style={repeatLabelStyle}>
+                Create new task when
+                <select
+                  value={
+                    dueDateDraft[
+                      dueDateModal.field.smartDueDateKeys.createNextWhen
+                    ] || "Complete"
+                  }
+                  onChange={(event) =>
+                    updateDueDateDraft(
+                      dueDateModal.field!.smartDueDateKeys!.createNextWhen,
+                      event.target.value
+                    )
+                  }
+                  style={formInputStyle}
+                >
+                  <option value="Complete">Status is Complete</option>
+                  <option value="Canceled">Status is Canceled</option>
+                  <option value="Complete or Canceled">
+                    Status is Complete or Canceled
+                  </option>
+                </select>
+              </label>
+
+              <label style={repeatLabelStyle}>
+                Set new task status to
+                <select
+                  value={
+                    dueDateDraft[
+                      dueDateModal.field.smartDueDateKeys.nextTaskStatus
+                    ] || "To Do"
+                  }
+                  onChange={(event) =>
+                    updateDueDateDraft(
+                      dueDateModal.field!.smartDueDateKeys!.nextTaskStatus,
+                      event.target.value
+                    )
+                  }
+                  style={formInputStyle}
+                >
+                  <option value="To Do">To Do</option>
+                  <option value="In Progress">In Progress</option>
+                  <option value="Manager Review">Manager Review</option>
+                </select>
+              </label>
+
+              <label style={repeatCheckLabelStyle}>
+                <input
+                  type="checkbox"
+                  checked={
+                    dueDateDraft[
+                      dueDateModal.field.smartDueDateKeys.skipWeekends
+                    ] === "true"
+                  }
+                  onChange={(event) =>
+                    updateDueDateDraft(
+                      dueDateModal.field!.smartDueDateKeys!.skipWeekends,
+                      event.target.checked ? "true" : "false"
+                    )
+                  }
+                />
+                Skip weekends
+              </label>
+
+              <div style={copyFieldsBoxStyle}>
+                <div style={copyFieldsHeaderStyle}>
+                  <div>
+                    <strong>Fields to Copy</strong>
+                    <small style={fieldDescriptionStyle}>
+                      Choose what information copies into the next repeated task.
+                    </small>
+                  </div>
+
+                  <div style={copyButtonsStyle}>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateDueDateDraft(
+                          dueDateModal.field!.smartDueDateKeys!.recurrenceFieldsToCopy,
+                          getDefaultCopyFieldKeys()
+                        )
+                      }
+                      style={tinyTextButtonStyle}
+                    >
+                      Select all
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateDueDateDraft(
+                          dueDateModal.field!.smartDueDateKeys!.recurrenceFieldsToCopy,
+                          "__NONE__"
+                        )
+                      }
+                      style={tinyTextButtonStyle}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                </div>
+
+                <div style={copyFieldsListStyle}>
+                  {getCopyableFields().map((field) => (
+                    <label key={field.key} style={copyFieldItemStyle}>
+                      <input
+                        type="checkbox"
+                        checked={copyFieldIsSelected(field.key)}
+                        onChange={() => toggleCopyField(field.key)}
+                      />
+                      <span>{field.label}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div style={calendarPanelStyle}>
+              <div style={calendarTopStyle}>
+                <div>
+                  <div style={calendarLabelStyle}>Start Date</div>
+                  <strong>
+                    {dueDateDraft[dueDateModal.field.smartDueDateKeys.dueDate] ||
+                      "Pick date"}
+                  </strong>
+                </div>
+
+                <div>
+                  <div style={calendarLabelStyle}>End Date</div>
+                  <input
+                    type="date"
+                    value={
+                      dueDateDraft[
+                        dueDateModal.field.smartDueDateKeys.recurrenceEndDate
+                      ] || ""
+                    }
+                    onChange={(event) =>
+                      updateDueDateDraft(
+                        dueDateModal.field!.smartDueDateKeys!.recurrenceEndDate,
+                        event.target.value
+                      )
+                    }
+                    style={dateHeaderInputStyle}
+                  />
+                </div>
+              </div>
+
+              <div style={calendarNavStyle}>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCalendarMonth(
+                      new Date(
+                        calendarMonth.getFullYear(),
+                        calendarMonth.getMonth() - 1,
+                        1
+                      )
+                    )
+                  }
+                  style={calendarNavButtonStyle}
+                >
+                  ←
+                </button>
+
+                <strong>
+                  {calendarMonth.toLocaleString("default", { month: "long" })}{" "}
+                  {calendarMonth.getFullYear()}
+                </strong>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setCalendarMonth(
+                      new Date(
+                        calendarMonth.getFullYear(),
+                        calendarMonth.getMonth() + 1,
+                        1
+                      )
+                    )
+                  }
+                  style={calendarNavButtonStyle}
+                >
+                  →
+                </button>
+              </div>
+
+              <div style={calendarWeekStyle}>
+                {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+                  <span key={day}>{day}</span>
+                ))}
+              </div>
+
+              <div style={calendarGridStyle}>
+                {getCalendarDays().map((day, index) => {
+                  if (!day) {
+                    return <span key={`blank-${index}`} />;
+                  }
+
+                  const dateValue = formatDateForCalendar(
+                    new Date(
+                      calendarMonth.getFullYear(),
+                      calendarMonth.getMonth(),
+                      day
+                    )
+                  );
+
+                  const isSelected =
+                    dueDateDraft[dueDateModal.field!.smartDueDateKeys!.dueDate] ===
+                    dateValue;
+
+                  return (
+                    <button
+                      type="button"
+                      key={dateValue}
+                      onClick={() =>
+                        updateDueDateDraft(
+                          dueDateModal.field!.smartDueDateKeys!.dueDate,
+                          dateValue
+                        )
+                      }
+                      style={{
+                        ...calendarDayButtonStyle,
+                        ...(isSelected ? calendarDaySelectedStyle : {}),
+                      }}
+                    >
+                      {day}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div style={calendarFooterStyle}>
+                <button
+                  type="button"
+                  onClick={closeDueDateModal}
+                  style={secondaryButtonStyle}
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={saveDueDateModal}
+                  style={saveButtonStyle}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      ) : null}
+
+      {aiPromptOpen && aiPromptIsEnabled(config.aiPromptTooling) ? (
+        <div style={modalBackdropStyle} onClick={() => setAiPromptOpen(false)}>
+          <section style={aiModalStyle} onClick={(event) => event.stopPropagation()}>
+            <div style={modalHeaderStyle}>
+              <div>
+                <div style={floatingLabelSmallStyle}>AI PROMPT TOOLING</div>
+                <h2 style={recordTitleStyle}>
+                  {getAiPromptConfig(config.aiPromptTooling).title}
+                </h2>
+                <p style={recordIntroStyle}>
+                  Use this to think through the task before saving it.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setAiPromptOpen(false)}
+                style={secondaryButtonStyle}
+              >
+                Close
+              </button>
+            </div>
+
+            <div style={aiGridStyle}>
+              <label style={formLabelStyle}>
+                What is the purpose of the task?
+                <textarea
+                  value={aiPurpose}
+                  onChange={(event) => setAiPurpose(event.target.value)}
+                  style={formTextareaStyle}
+                />
+              </label>
+
+              <label style={formLabelStyle}>
+                What resources are needed to complete this task?
+                <textarea
+                  value={aiResources}
+                  onChange={(event) => setAiResources(event.target.value)}
+                  style={formTextareaStyle}
+                />
+              </label>
+
+              <label style={formLabelStyle}>
+                How do we know the task is done?
+                <textarea
+                  value={aiDone}
+                  onChange={(event) => setAiDone(event.target.value)}
+                  style={formTextareaStyle}
+                />
+              </label>
+            </div>
+
+            <div style={aiPreviewStyle}>
+              <div style={panelLabelStyle}>DESCRIPTION PREVIEW</div>
+              <pre style={aiPreviewTextStyle}>{generatedAiDescription()}</pre>
+            </div>
+
+            <button type="button" onClick={useAiDescription} style={saveButtonStyle}>
+              Use in Description
+            </button>
+          </section>
+        </div>
+      ) : null}
+    </main>
+  );
+
+  function formatLinkedRecordValue(
+    value: string | number | boolean | null,
+    type?: "text" | "date" | "currency" | "employee" | "boolean"
+  ) {
+    if (value === null || value === undefined || value === "") return "—";
+    if (type === "currency") return `$${Number(value || 0).toFixed(2)}`;
+    if (type === "employee") return getEmployeeName(value);
+    if (type === "boolean") return value ? "Yes" : "No";
+    if (type === "date") {
+      const text = String(value);
+      return text.includes("T") ? text.split("T")[0] : text;
+    }
+
+    return String(value);
+  }
+}
+
+const colors = {
+  navy: "#1C2333",
+  navyLight: "#232D42",
+  gold: "#C9A84C",
+  goldPale: "#F5EDD8",
+  cream: "#F8F5EE",
+  white: "#FFFFFF",
+  slate: "#5F6673",
+  border: "#DED8C8",
+  red: "#9F1239",
+  green: "#166534",
+  orange: "#FF6B2C",
+  orangeLight: "#FFE6DA",
+};
+
+const pageShellStyle: CSSProperties = {
+  minHeight: "100vh",
+  background: colors.cream,
+  color: colors.navy,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+  padding: "34px",
+};
+
+const headerStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "22px",
+  marginBottom: "24px",
+};
+
+const headerButtonStackStyle: CSSProperties = {
+  display: "grid",
+  gap: "10px",
+  justifyItems: "end",
+};
+
+const backLinkStyle: CSSProperties = {
+  display: "inline-block",
+  marginBottom: "16px",
+  color: colors.navy,
+  textDecoration: "none",
+  fontWeight: 700,
+};
+
+const eyebrowStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "11px",
+  letterSpacing: "0.16em",
+  marginBottom: "10px",
+};
+
+const titleStyle: CSSProperties = {
+  margin: 0,
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "42px",
+  fontWeight: 600,
+  letterSpacing: "-0.03em",
+};
+
+const descriptionStyle: CSSProperties = {
+  margin: "8px 0 0",
+  color: colors.slate,
+  fontSize: "16px",
+  maxWidth: "780px",
+};
+
+const primaryButtonStyle: CSSProperties = {
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "10px",
+  padding: "12px 16px",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const summaryGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: "14px",
+  marginBottom: "18px",
+};
+
+const summaryCardStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "18px",
+};
+
+const summaryLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+};
+
+const summaryValueStyle: CSSProperties = {
+  marginTop: "8px",
+  fontSize: "22px",
+  fontWeight: 800,
+};
+
+const summaryDescriptionStyle: CSSProperties = {
+  marginTop: "6px",
+  color: colors.slate,
+  fontSize: "12px",
+  lineHeight: 1.4,
+};
+
+const successBoxStyle: CSSProperties = {
+  background: "#ecfdf5",
+  color: colors.green,
+  border: "1px solid #bbf7d0",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const errorBoxStyle: CSSProperties = {
+  background: "#fff1f2",
+  color: colors.red,
+  border: "1px solid #fecdd3",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const panelStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "20px",
+  marginBottom: "18px",
+};
+
+const panelHeaderStyle: CSSProperties = {
+  marginBottom: "16px",
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "16px",
+  alignItems: "flex-start",
+};
+
+const panelLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+};
+
+const panelTitleStyle: CSSProperties = {
+  margin: "6px 0 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "28px",
+};
+
+const formGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: "16px",
+  marginBottom: "16px",
+};
+
+const formLabelStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  fontWeight: 700,
+  color: colors.navy,
+};
+
+const fieldLabelRowStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "6px",
+};
+
+const requiredStyle: CSSProperties = {
+  color: colors.red,
+};
+
+const infoIconStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "16px",
+  height: "16px",
+  borderRadius: "999px",
+  background: colors.goldPale,
+  color: colors.navy,
+  fontSize: "11px",
+  fontWeight: 900,
+  cursor: "help",
+};
+
+const fieldDescriptionStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "12px",
+  lineHeight: 1.4,
+  fontWeight: 500,
+};
+
+const optionHelpStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "12px",
+  lineHeight: 1.4,
+  fontWeight: 500,
+};
+
+const formInputStyle: CSSProperties = {
+  width: "100%",
+  minHeight: "42px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+  background: colors.white,
+  color: colors.navy,
+};
+
+const formTextareaStyle: CSSProperties = {
+  width: "100%",
+  minHeight: "110px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "10px",
+  background: colors.white,
+  color: colors.navy,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+};
+
+const buttonRowStyle: CSSProperties = {
+  display: "flex",
+  gap: "8px",
+  flexWrap: "wrap",
+};
+
+const saveButtonStyle: CSSProperties = {
+  padding: "9px 12px",
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "8px",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const secondaryButtonStyle: CSSProperties = {
+  padding: "9px 12px",
+  background: colors.goldPale,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "8px",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const deleteButtonStyle: CSSProperties = {
+  padding: "9px 12px",
+  background: colors.red,
+  color: colors.white,
+  border: "none",
+  borderRadius: "8px",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const tableCardStyle: CSSProperties = {
+  position: "relative",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 20px 50px rgba(28,35,51,0.08)",
+  overflow: "visible",
+};
+
+const toolbarStyle: CSSProperties = {
+  minHeight: "54px",
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  padding: "10px 14px",
+  borderBottom: `1px solid ${colors.border}`,
+  background: colors.white,
+  flexWrap: "wrap",
+};
+
+const toolbarButtonStyle: CSSProperties = {
+  height: "34px",
+  display: "flex",
+  alignItems: "center",
+  gap: "7px",
+  background: colors.orangeLight,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "7px",
+  padding: "0 10px",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const pillStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minWidth: "19px",
+  height: "19px",
+  borderRadius: "999px",
+  background: "rgba(255,255,255,0.8)",
+  color: colors.orange,
+  fontSize: "11px",
+  padding: "0 5px",
+};
+
+const findBoxStyle: CSSProperties = {
+  height: "34px",
+  minWidth: "180px",
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+};
+
+const searchInputStyle: CSSProperties = {
+  border: "none",
+  outline: "none",
+  width: "100%",
+  background: "transparent",
+  color: colors.navy,
+};
+
+const refreshButtonStyle: CSSProperties = {
+  height: "34px",
+  border: "none",
+  background: colors.navy,
+  color: colors.white,
+  borderRadius: "8px",
+  padding: "0 14px",
+  fontWeight: 800,
+  cursor: "pointer",
+  marginLeft: "auto",
+};
+
+const bulkToolbarStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "12px",
+  padding: "12px 14px",
+  background: colors.goldPale,
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const bulkTextStyle: CSSProperties = {
+  color: colors.navy,
+  fontWeight: 800,
+};
+
+const floatingPanelStyle: CSSProperties = {
+  position: "absolute",
+  top: "58px",
+  left: "14px",
+  right: "14px",
+  zIndex: 20,
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  borderTop: `5px solid ${colors.orange}`,
+  padding: "16px",
+  boxShadow: "0 18px 45px rgba(28,35,51,0.18)",
+  maxHeight: "calc(100vh - 220px)",
+  overflowY: "auto",
+};
+
+const smallFloatingPanelStyle: CSSProperties = {
+  position: "absolute",
+  top: "58px",
+  left: "14px",
+  width: "460px",
+  zIndex: 20,
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  borderTop: `5px solid ${colors.orange}`,
+  padding: "16px",
+  boxShadow: "0 18px 45px rgba(28,35,51,0.18)",
+  display: "grid",
+  gap: "12px",
+};
+
+const floatingHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "16px",
+  marginBottom: "14px",
+};
+
+const floatingLabelSmallStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+};
+
+const floatingTitleStyle: CSSProperties = {
+  fontWeight: 900,
+  fontSize: "18px",
+  marginTop: "4px",
+};
+
+const floatingLabelStyle: CSSProperties = {
+  fontWeight: 800,
+  color: colors.navy,
+  fontSize: "13px",
+};
+
+const floatingInputStyle: CSSProperties = {
+  display: "block",
+  width: "100%",
+  height: "40px",
+  marginTop: "6px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+  background: colors.white,
+  color: colors.navy,
+};
+
+const viewTwoColumnStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1.2fr",
+  gap: "16px",
+  minHeight: "430px",
+};
+
+const viewColumnStyle: CSSProperties = {
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "14px",
+  minHeight: "420px",
+  maxHeight: "calc(100vh - 340px)",
+  overflowY: "auto",
+};
+
+const fieldSearchBoxStyle: CSSProperties = {
+  height: "42px",
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  borderRadius: "10px",
+  padding: "0 12px",
+  margin: "12px 0",
+};
+
+const fieldListStyle: CSSProperties = {
+  display: "grid",
+  gap: "8px",
+};
+
+const availableFieldItemStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "12px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "12px",
+  textAlign: "left",
+  color: colors.navy,
+  cursor: "pointer",
+};
+
+const selectedFieldItemStyle: CSSProperties = {
+  background: colors.goldPale,
+  border: `1px solid ${colors.gold}`,
+  padding: "12px",
+  display: "flex",
+  alignItems: "center",
+  gap: "12px",
+};
+
+const fieldMetaStyle: CSSProperties = {
+  display: "block",
+  marginTop: "2px",
+  color: colors.slate,
+  fontWeight: 500,
+  fontSize: "12px",
+};
+
+const addArrowStyle: CSSProperties = {
+  width: "24px",
+  height: "24px",
+  borderRadius: "999px",
+  background: colors.orangeLight,
+  color: colors.orange,
+  display: "grid",
+  placeItems: "center",
+  fontWeight: 900,
+};
+
+const smallRemoveButtonStyle: CSSProperties = {
+  background: colors.white,
+  color: colors.navy,
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "8px 10px",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const filterStackStyle: CSSProperties = {
+  display: "grid",
+  gap: "10px",
+};
+
+const filterRowStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr auto",
+  gap: "10px",
+  alignItems: "end",
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "12px",
+};
+
+const emptyStateSmallStyle: CSSProperties = {
+  padding: "18px",
+  color: colors.slate,
+  background: colors.white,
+  border: `1px dashed ${colors.border}`,
+};
+
+const loadingStyle: CSSProperties = {
+  padding: "30px",
+  color: colors.slate,
+};
+
+const tableWrapStyle: CSSProperties = {
+  overflowX: "auto",
+};
+
+const tableStyle: CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: "14px",
+};
+
+const checkboxHeaderStyle: CSSProperties = {
+  width: "42px",
+  padding: "14px",
+  background: colors.cream,
+  borderBottom: `1px solid ${colors.border}`,
+  textAlign: "center",
+};
+
+const checkboxCellStyle: CSSProperties = {
+  width: "42px",
+  padding: "16px",
+  borderBottom: `1px solid ${colors.border}`,
+  textAlign: "center",
+};
+
+const accentHeaderStyle: CSSProperties = {
+  width: "42px",
+  padding: "14px",
+  background: colors.cream,
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const thStyle: CSSProperties = {
+  textAlign: "left",
+  padding: "14px 16px",
+  background: colors.cream,
+  color: colors.navy,
+  borderBottom: `1px solid ${colors.border}`,
+  fontSize: "11px",
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
+  fontFamily: "var(--font-dm-mono), monospace",
+};
+
+const trStyle: CSSProperties = {
+  background: colors.white,
+};
+
+const accentCellStyle: CSSProperties = {
+  width: "42px",
+  padding: "16px",
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const rowAccentStyle: CSSProperties = {
+  display: "block",
+  width: "6px",
+  height: "28px",
+  borderRadius: "999px",
+  background: colors.gold,
+  opacity: 0.75,
+};
+
+const tdStyle: CSSProperties = {
+  padding: "16px",
+  borderBottom: `1px solid ${colors.border}`,
+  verticalAlign: "top",
+  color: colors.navy,
+};
+
+const groupRowStyle: CSSProperties = {
+  background: colors.goldPale,
+  color: colors.navy,
+  padding: "12px 16px",
+  fontWeight: 900,
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const emptyStateStyle: CSSProperties = {
+  padding: "34px",
+  textAlign: "center",
+  color: colors.slate,
+};
+
+const smallInputStyle: CSSProperties = {
+  minWidth: "150px",
+  width: "100%",
+  height: "38px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 8px",
+  color: colors.navy,
+};
+
+const tableTextareaStyle: CSSProperties = {
+  minWidth: "240px",
+  width: "100%",
+  minHeight: "90px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "8px",
+  color: colors.navy,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+};
+
+const smartDueDateButtonStyle: CSSProperties = {
+  width: "100%",
+  minHeight: "42px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  background: colors.white,
+  color: colors.navy,
+  padding: "8px 10px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "10px",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const smartDueDateCompactButtonStyle: CSSProperties = {
+  ...smartDueDateButtonStyle,
+  minWidth: "250px",
+};
+
+const miniPillStyle: CSSProperties = {
+  background: colors.orangeLight,
+  color: colors.orange,
+  borderRadius: "999px",
+  padding: "3px 7px",
+  fontSize: "11px",
+};
+
+const linkedRecordButtonStyle: CSSProperties = {
+  border: "none",
+  background: colors.goldPale,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "8px 10px",
+  cursor: "pointer",
+  fontWeight: 800,
+  textAlign: "left",
+};
+
+const linkedRecordOpenButtonStyle: CSSProperties = {
+  border: "none",
+  background: colors.orangeLight,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "8px 10px",
+  cursor: "pointer",
+  fontWeight: 800,
+  textAlign: "left",
+};
+
+const modalBackdropStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 100,
+  background: "rgba(28,35,51,0.54)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "28px",
+};
+
+const recordModalStyle: CSSProperties = {
+  width: "min(1100px, 100%)",
+  maxHeight: "90vh",
+  overflowY: "auto",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.28)",
+  padding: "22px",
+};
+
+const linkedRecordModalStyle: CSSProperties = {
+  width: "min(900px, 100%)",
+  maxHeight: "90vh",
+  overflowY: "auto",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.28)",
+  padding: "22px",
+};
+
+const modalHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "18px",
+  marginBottom: "18px",
+};
+
+const recordTitleStyle: CSSProperties = {
+  margin: "6px 0 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "34px",
+};
+
+const recordIntroStyle: CSSProperties = {
+  color: colors.slate,
+  margin: "8px 0 0",
+};
+
+const recordGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: "16px",
+  marginBottom: "18px",
+};
+
+const linkedRecordGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: "12px",
+};
+
+const linkedRecordItemStyle: CSSProperties = {
+  border: `1px solid ${colors.border}`,
+  background: colors.cream,
+  padding: "12px",
+};
+
+const linkedRecordLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  marginBottom: "6px",
+};
+
+const linkedRecordValueStyle: CSSProperties = {
+  color: colors.navy,
+  fontWeight: 700,
+  whiteSpace: "pre-wrap",
+};
+
+const dueDateModalStyle: CSSProperties = {
+  width: "min(980px, 100%)",
+  maxHeight: "90vh",
+  overflowY: "auto",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.28)",
+  display: "grid",
+  gridTemplateColumns: "360px 1fr",
+};
+
+const repeatPanelStyle: CSSProperties = {
+  borderRight: `1px solid ${colors.border}`,
+  padding: "22px",
+  display: "grid",
+  gap: "14px",
+  maxHeight: "90vh",
+  overflowY: "auto",
+};
+
+const repeatHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "14px",
+};
+
+const repeatTitleStyle: CSSProperties = {
+  margin: 0,
+  fontSize: "20px",
+  fontWeight: 900,
+};
+
+const miniDescriptionStyle: CSSProperties = {
+  color: colors.slate,
+  margin: "6px 0 0",
+  fontSize: "12px",
+  lineHeight: 1.4,
+};
+
+const repeatStatusBoxStyle: CSSProperties = {
+  background: colors.goldPale,
+  border: `1px solid ${colors.border}`,
+  padding: "10px",
+  fontSize: "13px",
+};
+
+const repeatLabelStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  color: colors.navy,
+  fontWeight: 700,
+};
+
+const repeatCheckLabelStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  fontWeight: 800,
+};
+
+const customRepeatGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: "10px",
+};
+
+const toggleStyle: CSSProperties = {
+  width: "46px",
+  height: "24px",
+  borderRadius: "999px",
+  border: "none",
+  background: colors.border,
+  padding: "3px",
+  cursor: "pointer",
+};
+
+const toggleOnStyle: CSSProperties = {
+  background: colors.orange,
+};
+
+const toggleKnobStyle: CSSProperties = {
+  display: "block",
+  width: "18px",
+  height: "18px",
+  borderRadius: "999px",
+  background: colors.white,
+  transition: "transform 0.2s ease",
+};
+
+const toggleKnobOnStyle: CSSProperties = {
+  transform: "translateX(22px)",
+};
+
+const copyFieldsBoxStyle: CSSProperties = {
+  border: `1px solid ${colors.border}`,
+  background: colors.cream,
+  padding: "12px",
+  display: "grid",
+  gap: "10px",
+};
+
+const copyFieldsHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "flex-start",
+  justifyContent: "space-between",
+  gap: "10px",
+};
+
+const copyButtonsStyle: CSSProperties = {
+  display: "flex",
+  gap: "8px",
+};
+
+const tinyTextButtonStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: colors.orange,
+  cursor: "pointer",
+  fontWeight: 900,
+  padding: 0,
+};
+
+const copyFieldsListStyle: CSSProperties = {
+  display: "grid",
+  gap: "7px",
+};
+
+const copyFieldItemStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  fontWeight: 700,
+  color: colors.navy,
+};
+
+const calendarPanelStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateRows: "auto auto auto 1fr auto",
+};
+
+const calendarTopStyle: CSSProperties = {
+  background: colors.orange,
+  color: colors.white,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-around",
+  padding: "18px",
+};
+
+const calendarLabelStyle: CSSProperties = {
+  fontSize: "11px",
+  fontWeight: 800,
+  opacity: 0.9,
+  marginBottom: "4px",
+};
+
+const dateHeaderInputStyle: CSSProperties = {
+  border: "none",
+  borderRadius: "8px",
+  padding: "7px",
+  color: colors.navy,
+};
+
+const calendarNavStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  padding: "14px 28px",
+};
+
+const calendarNavButtonStyle: CSSProperties = {
+  border: "none",
+  background: colors.white,
+  color: colors.slate,
+  fontSize: "22px",
+  cursor: "pointer",
+};
+
+const calendarWeekStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(7, 1fr)",
+  textAlign: "center",
+  color: colors.navy,
+  fontSize: "13px",
+  padding: "0 24px 8px",
+};
+
+const calendarGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(7, 1fr)",
+  gap: "6px",
+  padding: "0 24px 24px",
+};
+
+const calendarDayButtonStyle: CSSProperties = {
+  aspectRatio: "1",
+  border: "none",
+  borderRadius: "999px",
+  background: colors.white,
+  color: colors.navy,
+  cursor: "pointer",
+  fontWeight: 700,
+};
+
+const calendarDaySelectedStyle: CSSProperties = {
+  background: colors.orange,
+  color: colors.white,
+};
+
+const calendarFooterStyle: CSSProperties = {
+  borderTop: `1px solid ${colors.border}`,
+  padding: "14px 18px",
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: "10px",
+};
+
+const aiModalStyle: CSSProperties = {
+  width: "min(980px, 100%)",
+  maxHeight: "90vh",
+  overflowY: "auto",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.28)",
+  padding: "22px",
+};
+
+const aiGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: "14px",
+  marginBottom: "16px",
+};
+
+const aiPreviewStyle: CSSProperties = {
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const aiPreviewTextStyle: CSSProperties = {
+  whiteSpace: "pre-wrap",
+  margin: "10px 0 0",
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+  color: colors.navy,
+};
+
+const actionMenuWrapStyle: CSSProperties = {
+  position: "relative",
+  display: "inline-block",
+};
+
+const actionMenuButtonStyle: CSSProperties = {
+  width: "34px",
+  height: "34px",
+  borderRadius: "999px",
+  border: `1px solid ${colors.border}`,
+  background: colors.white,
+  color: colors.navy,
+  cursor: "pointer",
+  fontWeight: 900,
+  fontSize: "18px",
+  lineHeight: 1,
+};
+
+const actionDropdownStyle: CSSProperties = {
+  position: "absolute",
+  top: "38px",
+  right: 0,
+  zIndex: 30,
+  minWidth: "170px",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 12px 30px rgba(28,35,51,0.14)",
+  padding: "6px",
+};
+
+const actionDropdownButtonStyle: CSSProperties = {
+  display: "block",
+  width: "100%",
+  border: "none",
+  background: colors.white,
+  color: colors.navy,
+  textAlign: "left",
+  padding: "9px 10px",
+  cursor: "pointer",
+  fontWeight: 700,
+};
+
+const actionDropdownDangerButtonStyle: CSSProperties = {
+  ...actionDropdownButtonStyle,
+  color: colors.red,
+};

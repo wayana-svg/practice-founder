@@ -1,0 +1,3794 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
+import { createClient } from "../../lib/supabase/client";
+
+type RowData = Record<string, string | number | boolean | null>;
+
+type Employee = {
+  id: number;
+  name: string | null;
+};
+
+type LinkedDeliverable = {
+  id: number;
+  deliverable_name: string | null;
+  linked_task: number | null;
+};
+
+type LinkedIssue = {
+  id: number;
+  issue_name: string | null;
+  linked_task: number | null;
+};
+
+type OptionDefinition = {
+  value: string;
+  label: string;
+  description: string;
+};
+
+type FieldType =
+  | "text"
+  | "select"
+  | "date"
+  | "time"
+  | "employee"
+  | "number"
+  | "boolean"
+  | "url"
+  | "textarea";
+
+type FieldDefinition = {
+  key: string;
+  label: string;
+  type: FieldType;
+  description: string;
+  options?: OptionDefinition[];
+  table?: boolean;
+  bulk?: boolean;
+};
+
+type ModalMode = "add" | "open" | "edit";
+
+const defaultAiToolLink = "https://chatgpt.com/g/g-BR7u9y8sL-task-creator";
+
+const statusOptions: OptionDefinition[] = [
+  {
+    value: "To Do",
+    label: "To Do",
+    description: "The task has not started yet.",
+  },
+  {
+    value: "In Progress",
+    label: "In Progress",
+    description: "The task is actively being worked on.",
+  },
+  {
+    value: "Revision Required",
+    label: "Revision Required",
+    description: "The task needs changes before it can be completed.",
+  },
+  {
+    value: "Manager Review",
+    label: "Manager Review",
+    description: "The task is ready for a manager to review.",
+  },
+  {
+    value: "On Hold",
+    label: "On Hold",
+    description: "The task is paused because something is blocking progress.",
+  },
+  {
+    value: "Complete",
+    label: "Complete",
+    description:
+      "The task is finished. For repeating tasks, this can create the next task.",
+  },
+  {
+    value: "Canceled",
+    label: "Canceled",
+    description:
+      "The task will not be completed. For repeating tasks, this can create the next task if the repeat rule allows it.",
+  },
+];
+
+const priorityOptions: OptionDefinition[] = [
+  {
+    value: "Urgent and Important",
+    label: "Urgent and Important",
+    description:
+      "Do this first. It is both time-sensitive and important to the practice.",
+  },
+  {
+    value: "Important",
+    label: "Important",
+    description:
+      "This matters and should be completed, but it is not an emergency today.",
+  },
+  {
+    value: "Not Urgent",
+    label: "Not Urgent",
+    description: "This can be planned for later without immediate risk.",
+  },
+  {
+    value: "Urgent, Not Important",
+    label: "Urgent, Not Important",
+    description:
+      "This is time-sensitive, but it may not be high-value or strategic.",
+  },
+  {
+    value: "Not Important, Not Urgent",
+    label: "Not Important, Not Urgent",
+    description:
+      "Lowest priority. Handle only after higher-value work is complete.",
+  },
+];
+
+const taskTypeOptions: OptionDefinition[] = [
+  {
+    value: "One-time",
+    label: "One-time",
+    description: "A task that happens once and does not repeat automatically.",
+  },
+  {
+    value: "Recurring/Routine",
+    label: "Recurring/Routine",
+    description: "A task that happens on a regular schedule or routine cadence.",
+  },
+  {
+    value: "Follow-up",
+    label: "Follow-up",
+    description:
+      "A task created to follow up on previous work, a patient item, an issue, or a huddle discussion.",
+  },
+];
+
+const functionAreaOptions: OptionDefinition[] = [
+  {
+    value: "Daily Operations",
+    label: "Daily Operations",
+    description:
+      "Daily practice flow, opening checklists, huddles, closeout, and operational readiness.",
+  },
+  {
+    value: "Front Desk / Reception",
+    label: "Front Desk / Reception",
+    description:
+      "Scheduling, phones, check-in, intake, referrals, patient communication, and front desk activity.",
+  },
+  {
+    value: "Provider Operations",
+    label: "Provider Operations",
+    description:
+      "Physician, clinical, charting, provider workflow, patient care, or documentation tasks.",
+  },
+  {
+    value: "Billing & Claims",
+    label: "Billing & Claims",
+    description:
+      "Claims creation, submission, rejections, denials, coding follow-up, and billing workflow.",
+  },
+  {
+    value: "AR & Payments",
+    label: "AR & Payments",
+    description:
+      "Accounts receivable, payer balances, patient balances, payment follow-up, and collections.",
+  },
+  {
+    value: "Finance",
+    label: "Finance",
+    description:
+      "Revenue, payroll, expenses, owner pay, deposits, weekly financial reporting, and cash flow.",
+  },
+  {
+    value: "Membership",
+    label: "Membership",
+    description:
+      "Membership starts, cancellations, reactivations, failed payments, outreach, and follow-up.",
+  },
+];
+
+const dueDateTypeOptions: OptionDefinition[] = [
+  {
+    value: "Standard",
+    label: "Standard",
+    description:
+      "One due date only. This task does not automatically create another task.",
+  },
+  {
+    value: "Repeating",
+    label: "Repeating",
+    description:
+      "This task can create the next task when the trigger status is reached.",
+  },
+];
+
+const recurrenceFrequencyOptions: OptionDefinition[] = [
+  {
+    value: "Daily",
+    label: "Daily",
+    description: "The next task is created by adding days to the due date.",
+  },
+  {
+    value: "Weekly",
+    label: "Weekly",
+    description: "The next task is created by adding weeks to the due date.",
+  },
+  {
+    value: "Monthly",
+    label: "Monthly",
+    description: "The next task is created by adding months to the due date.",
+  },
+  {
+    value: "Custom",
+    label: "Custom",
+    description: "Use a custom repeat interval.",
+  },
+];
+
+const recurrenceRuleOptions: OptionDefinition[] = [
+  {
+    value: "Every Day",
+    label: "Every Day",
+    description: "Repeat every calendar day.",
+  },
+  {
+    value: "Weekdays Only",
+    label: "Weekdays Only",
+    description: "Repeat on weekdays only.",
+  },
+  {
+    value: "Monday",
+    label: "Monday",
+    description: "Repeat on Monday.",
+  },
+  {
+    value: "Tuesday",
+    label: "Tuesday",
+    description: "Repeat on Tuesday.",
+  },
+  {
+    value: "Wednesday",
+    label: "Wednesday",
+    description: "Repeat on Wednesday.",
+  },
+  {
+    value: "Thursday",
+    label: "Thursday",
+    description: "Repeat on Thursday.",
+  },
+  {
+    value: "Friday",
+    label: "Friday",
+    description: "Repeat on Friday.",
+  },
+  {
+    value: "First Monday",
+    label: "First Monday",
+    description: "Repeat on the first Monday of the month.",
+  },
+  {
+    value: "First Tuesday",
+    label: "First Tuesday",
+    description: "Repeat on the first Tuesday of the month.",
+  },
+  {
+    value: "First Wednesday",
+    label: "First Wednesday",
+    description: "Repeat on the first Wednesday of the month.",
+  },
+  {
+    value: "First Thursday",
+    label: "First Thursday",
+    description: "Repeat on the first Thursday of the month.",
+  },
+  {
+    value: "First Friday",
+    label: "First Friday",
+    description: "Repeat on the first Friday of the month.",
+  },
+  {
+    value: "Same Day of Month",
+    label: "Same Day of Month",
+    description: "Repeat on the same date number each month.",
+  },
+  {
+    value: "Last Friday",
+    label: "Last Friday",
+    description: "Repeat on the last Friday of the month.",
+  },
+];
+
+const createNextWhenOptions: OptionDefinition[] = [
+  {
+    value: "Complete",
+    label: "Complete",
+    description: "Create the next task when this task is marked Complete.",
+  },
+  {
+    value: "Canceled",
+    label: "Canceled",
+    description: "Create the next task when this task is marked Canceled.",
+  },
+  {
+    value: "Complete or Canceled",
+    label: "Complete or Canceled",
+    description:
+      "Create the next task when this task is marked Complete or Canceled.",
+  },
+];
+
+const copyFieldsOptions: OptionDefinition[] = [
+  {
+    value: "All Fields",
+    label: "All Fields",
+    description: "Copy the full task setup into the next repeating task.",
+  },
+  {
+    value: "Core Fields Only",
+    label: "Core Fields Only",
+    description: "Copy the main task details, owner, priority, and repeat rule.",
+  },
+  {
+    value: "Title and Schedule Only",
+    label: "Title and Schedule Only",
+    description:
+      "Copy only the title and schedule. Use this when notes should not carry forward.",
+  },
+];
+
+const yesNoOptions: OptionDefinition[] = [
+  {
+    value: "No",
+    label: "No",
+    description: "This setting is off.",
+  },
+  {
+    value: "Yes",
+    label: "Yes",
+    description: "This setting is on.",
+  },
+];
+
+const fieldDefinitions: FieldDefinition[] = [
+  {
+    key: "task_title",
+    label: "Task Title",
+    type: "text",
+    table: true,
+    description:
+      "Short, clear name of the task. This should tell the assignee what needs to be done.",
+  },
+  {
+    key: "status",
+    label: "Status",
+    type: "select",
+    table: true,
+    bulk: true,
+    options: statusOptions,
+    description: "Current workflow stage of the task.",
+  },
+  {
+    key: "priority",
+    label: "Priority",
+    type: "select",
+    table: true,
+    bulk: true,
+    options: priorityOptions,
+    description: "How urgent and important the task is.",
+  },
+  {
+    key: "assigned_to",
+    label: "Assigned To",
+    type: "employee",
+    table: true,
+    bulk: true,
+    description: "The employee responsible for completing the task.",
+  },
+  {
+    key: "task_type",
+    label: "Task Type",
+    type: "select",
+    table: true,
+    bulk: true,
+    options: taskTypeOptions,
+    description: "The kind of task being created.",
+  },
+  {
+    key: "function_area",
+    label: "Function Area",
+    type: "select",
+    table: true,
+    bulk: true,
+    options: functionAreaOptions,
+    description: "The business area this task belongs to.",
+  },
+  {
+    key: "due_date_type",
+    label: "Due Date Type",
+    type: "select",
+    table: true,
+    bulk: true,
+    options: dueDateTypeOptions,
+    description: "Whether this is a one-time task or a repeating task.",
+  },
+  {
+    key: "due_date",
+    label: "Due Date",
+    type: "date",
+    table: true,
+    bulk: true,
+    description: "The date the task should be completed.",
+  },
+  {
+    key: "due_time",
+    label: "Due Time",
+    type: "time",
+    bulk: true,
+    description: "Optional time the task should be completed.",
+  },
+  {
+    key: "recurrence_frequency",
+    label: "Recurrence Frequency",
+    type: "select",
+    options: recurrenceFrequencyOptions,
+    description: "How often the next task should be created.",
+  },
+  {
+    key: "recurrence_interval",
+    label: "Recurrence Interval",
+    type: "number",
+    description: "Repeat interval, such as every 1 week or every 2 months.",
+  },
+  {
+    key: "recurrence_days",
+    label: "Repeat Rule",
+    type: "select",
+    options: recurrenceRuleOptions,
+    description: "Day or rule used for the repeat schedule.",
+  },
+  {
+    key: "recurrence_monthly_rule",
+    label: "Monthly Rule",
+    type: "select",
+    options: recurrenceRuleOptions,
+    description: "Monthly repeat rule.",
+  },
+  {
+    key: "skip_weekends",
+    label: "Skip Weekends",
+    type: "boolean",
+    options: yesNoOptions,
+    description:
+      "When Yes, a due date that lands on Saturday or Sunday moves to Monday.",
+  },
+  {
+    key: "create_next_when",
+    label: "Create Next Task When",
+    type: "select",
+    options: createNextWhenOptions,
+    description: "The status change that creates the next repeating task.",
+  },
+  {
+    key: "recurrence_end_date",
+    label: "Recurrence End Date",
+    type: "date",
+    description: "Optional final date for the repeat schedule.",
+  },
+  {
+    key: "next_task_status",
+    label: "Next Task Status",
+    type: "select",
+    options: statusOptions,
+    description: "Status assigned to the next task that gets created.",
+  },
+  {
+    key: "recurrence_fields_to_copy",
+    label: "Fields to Copy",
+    type: "select",
+    options: copyFieldsOptions,
+    description: "Controls which details carry into the next repeating task.",
+  },
+  {
+    key: "ai_prompt_tool_link",
+    label: "AI Prompt Tool Link",
+    type: "url",
+    description:
+      "Link to the AI task creator used to help write a clear task description.",
+  },
+  {
+    key: "description",
+    label: "Description",
+    type: "textarea",
+    description:
+      "Task details. Include the purpose, resources needed, and definition of done.",
+  },
+  {
+    key: "notes",
+    label: "Notes",
+    type: "textarea",
+    description: "Optional extra context, follow-up notes, or comments.",
+  },
+];
+
+const defaultVisibleFieldKeys = [
+  "task_title",
+  "status",
+  "priority",
+  "assigned_to",
+  "due_date",
+  "function_area",
+  "task_type",
+  "due_date_type",
+];
+
+const filterableFieldKeys = [
+  "status",
+  "priority",
+  "assigned_to",
+  "function_area",
+  "task_type",
+  "due_date_type",
+];
+
+const groupableFieldKeys = [
+  "status",
+  "priority",
+  "assigned_to",
+  "function_area",
+  "task_type",
+  "due_date_type",
+];
+
+const initialDraft: RowData = {
+  task_title: "",
+  status: "To Do",
+  priority: "Important",
+  assigned_to: null,
+  task_type: "One-time",
+  function_area: "",
+  due_date_type: "Standard",
+  due_date: "",
+  due_time: "",
+  recurrence_frequency: "Monthly",
+  recurrence_interval: 1,
+  recurrence_days: "First Friday",
+  recurrence_monthly_rule: "First Friday",
+  skip_weekends: false,
+  create_next_when: "Complete",
+  recurrence_end_date: "",
+  next_task_status: "To Do",
+  recurrence_fields_to_copy: "All Fields",
+  ai_prompt_tool_link: defaultAiToolLink,
+  description:
+    "What is the purpose of the task?\n\nWhat resources are needed to complete this task?\n\nHow do we know the task is done?",
+  notes: "",
+};
+
+function getField(key: string) {
+  return fieldDefinitions.find((field) => field.key === key);
+}
+
+function getOptionDescription(
+  options: OptionDefinition[] | undefined,
+  value: string | number | boolean | null | undefined
+) {
+  if (!options) return "";
+  return (
+    options.find((option) => option.value === String(value))?.description || ""
+  );
+}
+
+function valueToNumberOrNull(
+  value: string | number | boolean | null | undefined
+) {
+  if (value === "" || value === null || value === undefined) return null;
+  return Number(value);
+}
+
+function valueToBoolean(value: string | number | boolean | null | undefined) {
+  return value === true || value === "true" || value === "Yes" || value === "1";
+}
+
+function booleanToYesNo(value: string | number | boolean | null | undefined) {
+  return valueToBoolean(value) ? "Yes" : "No";
+}
+
+function formatDate(value: string | number | boolean | null | undefined) {
+  if (!value) return "-";
+  return String(value).split("T")[0];
+}
+
+function formatTime(value: string | number | boolean | null | undefined) {
+  if (!value) return "-";
+  return String(value).slice(0, 5);
+}
+
+function formatDateLabel(value: string | number | boolean | null | undefined) {
+  if (!value) return "Select";
+
+  const date = new Date(`${String(value).split("T")[0]}T12:00:00`);
+
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function formatMonthYear(date: Date) {
+  return date.toLocaleDateString("en-US", {
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function toDateInputValue(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function getMonthDays(calendarDate: Date) {
+  const year = calendarDate.getFullYear();
+  const month = calendarDate.getMonth();
+  const firstDay = new Date(year, month, 1);
+  const firstWeekday = firstDay.getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells: Array<number | null> = [];
+
+  for (let index = 0; index < firstWeekday; index += 1) {
+    cells.push(null);
+  }
+
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    cells.push(day);
+  }
+
+  while (cells.length % 7 !== 0) {
+    cells.push(null);
+  }
+
+  return cells;
+}
+
+function escapeCsvValue(value: string | number | boolean | null | undefined) {
+  if (value === null || value === undefined) return "";
+  const text = String(value);
+
+  if (text.includes(",") || text.includes('"') || text.includes("\n")) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+
+  return text;
+}
+
+function parseCsvLine(line: string) {
+  const values: string[] = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    const nextCharacter = line[index + 1];
+
+    if (character === '"' && inQuotes && nextCharacter === '"') {
+      current += '"';
+      index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (character === "," && !inQuotes) {
+      values.push(current);
+      current = "";
+      continue;
+    }
+
+    current += character;
+  }
+
+  values.push(current);
+  return values;
+}
+
+function parseCsv(text: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.trim() !== "");
+
+  if (lines.length < 2) {
+    return { headers: [] as string[], rows: [] as Record<string, string>[] };
+  }
+
+  const headers = parseCsvLine(lines[0]).map((header) => header.trim());
+
+  const rows = lines.slice(1).map((line) => {
+    const values = parseCsvLine(line);
+    const row: Record<string, string> = {};
+
+    headers.forEach((header, index) => {
+      row[header] = values[index] || "";
+    });
+
+    return row;
+  });
+
+  return { headers, rows };
+}
+
+function isOverdue(row: RowData) {
+  if (!row.due_date) return false;
+  if (["Complete", "Canceled"].includes(String(row.status || ""))) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const due = new Date(String(row.due_date));
+  due.setHours(0, 0, 0, 0);
+
+  return due < today;
+}
+
+function isDueSoon(row: RowData) {
+  if (!row.due_date) return false;
+  if (["Complete", "Canceled"].includes(String(row.status || ""))) return false;
+
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  const due = new Date(String(row.due_date));
+  due.setHours(0, 0, 0, 0);
+
+  const diffDays = Math.ceil(
+    (due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24)
+  );
+
+  return diffDays >= 0 && diffDays <= 7;
+}
+
+export default function TasksListPage() {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const [rows, setRows] = useState<RowData[]>([]);
+  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [deliverables, setDeliverables] = useState<LinkedDeliverable[]>([]);
+  const [issues, setIssues] = useState<LinkedIssue[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  const [message, setMessage] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const [searchText, setSearchText] = useState("");
+  const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
+  const [rowActionMenuId, setRowActionMenuId] = useState<string | null>(null);
+
+  const [activeCell, setActiveCell] = useState<{
+    rowId: string;
+    fieldKey: string;
+  } | null>(null);
+  const [cellValue, setCellValue] = useState("");
+
+  const [modalMode, setModalMode] = useState<ModalMode | null>(null);
+  const [activeRecord, setActiveRecord] = useState<RowData | null>(null);
+  const [draft, setDraft] = useState<RowData>({ ...initialDraft });
+
+  const [filterOpen, setFilterOpen] = useState(false);
+  const [sortOpen, setSortOpen] = useState(false);
+  const [groupOpen, setGroupOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+
+  const [filterFieldKey, setFilterFieldKey] = useState("status");
+  const [filterValue, setFilterValue] = useState("");
+  const [sortFieldKey, setSortFieldKey] = useState("due_date");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
+  const [groupFieldKey, setGroupFieldKey] = useState("none");
+
+  const [visibleFieldKeys, setVisibleFieldKeys] = useState<string[]>(
+    defaultVisibleFieldKeys
+  );
+
+  const [bulkUpdateFieldKey, setBulkUpdateFieldKey] = useState("status");
+  const [bulkUpdateValue, setBulkUpdateValue] = useState("Complete");
+
+  useEffect(() => {
+    loadEverything();
+  }, []);
+
+  const visibleFields = useMemo(() => {
+    return visibleFieldKeys
+      .map(getField)
+      .filter((field): field is FieldDefinition => Boolean(field));
+  }, [visibleFieldKeys]);
+
+  const processedRows = useMemo(() => {
+    const search = searchText.trim().toLowerCase();
+    let nextRows = [...rows];
+
+    if (search) {
+      nextRows = nextRows.filter((row) => {
+        return [
+          row.id,
+          row.task_title,
+          row.status,
+          row.priority,
+          row.function_area,
+          row.task_type,
+          row.description,
+          row.notes,
+        ]
+          .map((value) => String(value || "").toLowerCase())
+          .some((value) => value.includes(search));
+      });
+    }
+
+    if (filterValue) {
+      nextRows = nextRows.filter(
+        (row) => String(row[filterFieldKey] || "") === filterValue
+      );
+    }
+
+    nextRows.sort((a, b) => {
+      const aValue = String(a[sortFieldKey] || "");
+      const bValue = String(b[sortFieldKey] || "");
+      const result = aValue.localeCompare(bValue, undefined, { numeric: true });
+      return sortDirection === "asc" ? result : -result;
+    });
+
+    return nextRows;
+  }, [rows, searchText, filterFieldKey, filterValue, sortFieldKey, sortDirection]);
+
+  const groupedRows = useMemo(() => {
+    if (groupFieldKey === "none") {
+      return [{ group: "", rows: processedRows }];
+    }
+
+    const groups = new Map<string, RowData[]>();
+
+    processedRows.forEach((row) => {
+      const label = displayValue(row, groupFieldKey) || "Blank";
+      groups.set(label, [...(groups.get(label) || []), row]);
+    });
+
+    return Array.from(groups.entries()).map(([group, groupRows]) => ({
+      group,
+      rows: groupRows,
+    }));
+  }, [processedRows, groupFieldKey, employees]);
+
+  const selectedRows = rows.filter((row) =>
+    selectedRowIds.includes(String(row.id))
+  );
+
+  const allVisibleSelected =
+    processedRows.length > 0 &&
+    processedRows.every((row) => selectedRowIds.includes(String(row.id)));
+
+  const kpis = [
+    {
+      label: "Total Tasks",
+      value: rows.length,
+      help: "All tasks currently saved in the task table.",
+    },
+    {
+      label: "Open Tasks",
+      value: rows.filter(
+        (row) => !["Complete", "Canceled"].includes(String(row.status || ""))
+      ).length,
+      help: "Tasks that are not complete or canceled.",
+    },
+    {
+      label: "Overdue",
+      value: rows.filter(isOverdue).length,
+      help: "Open tasks with a due date before today.",
+    },
+    {
+      label: "Due Soon",
+      value: rows.filter(isDueSoon).length,
+      help: "Open tasks due within the next 7 days.",
+    },
+  ];
+
+  async function loadEverything() {
+    setLoading(true);
+    setMessage("");
+    setErrorMessage("");
+
+    const supabase = createClient();
+
+    const [tasksResult, employeesResult, deliverablesResult, issuesResult] =
+      await Promise.all([
+        supabase.from("tasks").select("*").order("created_at", {
+          ascending: false,
+        }),
+        supabase.from("employees").select("id, name").order("name", {
+          ascending: true,
+        }),
+        supabase
+          .from("deliverables")
+          .select("id, deliverable_name, linked_task"),
+        supabase.from("issues_breakdowns").select("id, issue_name, linked_task"),
+      ]);
+
+    if (tasksResult.error) {
+      setErrorMessage(tasksResult.error.message);
+    } else {
+      setRows((tasksResult.data as RowData[]) || []);
+    }
+
+    if (!employeesResult.error) {
+      setEmployees((employeesResult.data as Employee[]) || []);
+    }
+
+    if (!deliverablesResult.error) {
+      setDeliverables((deliverablesResult.data as LinkedDeliverable[]) || []);
+    }
+
+    if (!issuesResult.error) {
+      setIssues((issuesResult.data as LinkedIssue[]) || []);
+    }
+
+    setLoading(false);
+  }
+
+  function getEmployeeName(id: string | number | boolean | null | undefined) {
+    if (!id) return "-";
+    const employee = employees.find((item) => item.id === Number(id));
+    return employee?.name || `Employee #${id}`;
+  }
+
+  function displayValue(row: RowData, key: string) {
+    if (key === "assigned_to") return getEmployeeName(row[key]);
+    if (key === "due_date") return formatDate(row[key]);
+    if (key === "due_time") return formatTime(row[key]);
+    if (key === "skip_weekends") return booleanToYesNo(row[key]);
+    return String(row[key] ?? "-");
+  }
+
+  function updateDraft(key: string, value: string | number | boolean | null) {
+    setDraft((current) => ({
+      ...current,
+      [key]: value,
+    }));
+  }
+
+  function cleanPayload(source: RowData) {
+    const isRepeating = String(source.due_date_type || "Standard") === "Repeating";
+
+    return {
+      task_title: source.task_title || null,
+      status: source.status || "To Do",
+      priority: source.priority || "Important",
+      assigned_to: valueToNumberOrNull(source.assigned_to),
+      task_type: source.task_type || null,
+      function_area: source.function_area || null,
+
+      due_date_type: isRepeating ? "Repeating" : "Standard",
+      due_date: source.due_date || null,
+      due_time: source.due_time || null,
+
+      recurrence_frequency: isRepeating
+        ? source.recurrence_frequency || null
+        : null,
+      recurrence_interval: isRepeating
+        ? Number(source.recurrence_interval || 1)
+        : 1,
+      recurrence_days: isRepeating ? source.recurrence_days || null : null,
+      recurrence_monthly_rule: isRepeating
+        ? source.recurrence_monthly_rule || source.recurrence_days || null
+        : null,
+      skip_weekends: isRepeating ? valueToBoolean(source.skip_weekends) : false,
+      create_next_when: isRepeating
+        ? source.create_next_when || "Complete"
+        : null,
+      recurrence_end_date: isRepeating
+        ? source.recurrence_end_date || null
+        : null,
+      next_task_status: isRepeating ? source.next_task_status || "To Do" : null,
+      recurrence_fields_to_copy: isRepeating
+        ? source.recurrence_fields_to_copy || "All Fields"
+        : null,
+
+      ai_prompt_tool_link: source.ai_prompt_tool_link || defaultAiToolLink,
+      description: source.description || null,
+      notes: source.notes || null,
+    };
+  }
+
+  function openAddModal() {
+    setActiveRecord(null);
+    setDraft({ ...initialDraft });
+    setModalMode("add");
+  }
+
+  function openRecord(row: RowData) {
+    setActiveRecord(row);
+    setDraft({ ...initialDraft, ...row });
+    setModalMode("open");
+    setRowActionMenuId(null);
+  }
+
+  function editRecord(row: RowData) {
+    setActiveRecord(row);
+    setDraft({ ...initialDraft, ...row });
+    setModalMode("edit");
+    setRowActionMenuId(null);
+  }
+
+  async function saveRecord() {
+    setMessage("");
+    setErrorMessage("");
+
+    if (!String(draft.task_title || "").trim()) {
+      setErrorMessage("Task Title is required.");
+      return;
+    }
+
+    const supabase = createClient();
+
+    if (modalMode === "add") {
+      const { error } = await supabase.from("tasks").insert(cleanPayload(draft));
+
+      if (error) {
+        setErrorMessage(error.message);
+        return;
+      }
+
+      setMessage("Task added.");
+    }
+
+    if (modalMode === "edit" && activeRecord?.id) {
+      const { error } = await supabase
+        .from("tasks")
+        .update(cleanPayload(draft))
+        .eq("id", activeRecord.id);
+
+      if (error) {
+        setErrorMessage(error.message);
+        return;
+      }
+
+      setMessage("Task updated.");
+    }
+
+    closeModal();
+    await loadEverything();
+  }
+
+  function closeModal() {
+    setModalMode(null);
+    setActiveRecord(null);
+    setDraft({ ...initialDraft });
+  }
+
+  async function duplicateRecord(row: RowData) {
+    setMessage("");
+    setErrorMessage("");
+
+    const copy = { ...row };
+    delete copy.id;
+    delete copy.created_at;
+
+    copy.task_title = `${row.task_title || "Task"} Copy`;
+    copy.status = "To Do";
+
+    const supabase = createClient();
+    const { error } = await supabase.from("tasks").insert(cleanPayload(copy));
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Task duplicated.");
+    setRowActionMenuId(null);
+    await loadEverything();
+  }
+
+  async function deleteRecord(row: RowData) {
+    const taskId = Number(row.id);
+    const linkedDeliverables = deliverables.filter(
+      (item) => Number(item.linked_task) === taskId
+    );
+    const linkedIssues = issues.filter(
+      (item) => Number(item.linked_task) === taskId
+    );
+
+    if (linkedDeliverables.length > 0 || linkedIssues.length > 0) {
+      setErrorMessage(
+        `This task cannot be deleted because it has ${linkedDeliverables.length} linked deliverable(s) and ${linkedIssues.length} linked issue(s). Open the task and unlink those records first.`
+      );
+      setRowActionMenuId(null);
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${row.task_title || "this task"}"? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    const supabase = createClient();
+    const { error } = await supabase.from("tasks").delete().eq("id", row.id);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Task deleted.");
+    setSelectedRowIds((current) =>
+      current.filter((id) => id !== String(row.id))
+    );
+    setRowActionMenuId(null);
+    await loadEverything();
+  }
+
+  function startCellEdit(row: RowData, field: FieldDefinition) {
+    setActiveCell({
+      rowId: String(row.id),
+      fieldKey: field.key,
+    });
+
+    if (field.type === "boolean") {
+      setCellValue(booleanToYesNo(row[field.key]));
+    } else {
+      setCellValue(String(row[field.key] ?? ""));
+    }
+  }
+
+  async function saveCellEdit(row: RowData, field: FieldDefinition) {
+    const supabase = createClient();
+
+    let value: string | number | boolean | null = cellValue;
+
+    if (field.type === "number") value = valueToNumberOrNull(cellValue);
+    if (field.type === "employee") value = valueToNumberOrNull(cellValue);
+    if (field.type === "boolean") value = cellValue === "Yes";
+    if (field.type === "date" && !cellValue) value = null;
+    if (field.type === "time" && !cellValue) value = null;
+
+    const { error } = await supabase
+      .from("tasks")
+      .update({ [field.key]: value })
+      .eq("id", row.id);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setRows((current) =>
+      current.map((item) =>
+        String(item.id) === String(row.id)
+          ? { ...item, [field.key]: value }
+          : item
+      )
+    );
+
+    setActiveCell(null);
+    setCellValue("");
+    setMessage("Cell updated.");
+  }
+
+  function renderInlineEditor(row: RowData, field: FieldDefinition) {
+    if (
+      !activeCell ||
+      activeCell.rowId !== String(row.id) ||
+      activeCell.fieldKey !== field.key
+    ) {
+      return (
+        <button
+          type="button"
+          title={`${field.label}: ${field.description}`}
+          onClick={() => startCellEdit(row, field)}
+          style={editableCellButtonStyle}
+        >
+          {displayValue(row, field.key)}
+        </button>
+      );
+    }
+
+    return (
+      <div style={inlineEditWrapStyle}>
+        {renderSmallInput(field, cellValue, setCellValue)}
+
+        <button
+          type="button"
+          onClick={() => saveCellEdit(row, field)}
+          style={miniSaveButtonStyle}
+        >
+          Save
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setActiveCell(null);
+            setCellValue("");
+          }}
+          style={miniCancelButtonStyle}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
+  function renderSmallInput(
+    field: FieldDefinition,
+    value: string,
+    setValue: (value: string) => void
+  ) {
+    if (field.type === "select" || field.type === "boolean") {
+      const options = field.type === "boolean" ? yesNoOptions : field.options || [];
+
+      return (
+        <select
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          style={inlineInputStyle}
+        >
+          <option value="">Select</option>
+          {options.map((option) => (
+            <option
+              key={option.value}
+              value={option.value}
+              title={option.description}
+            >
+              {option.label}
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    if (field.type === "employee") {
+      return (
+        <select
+          value={value}
+          onChange={(event) => setValue(event.target.value)}
+          style={inlineInputStyle}
+        >
+          <option value="">Select employee</option>
+          {employees.map((employee) => (
+            <option key={employee.id} value={employee.id}>
+              {employee.name || `Employee #${employee.id}`}
+            </option>
+          ))}
+        </select>
+      );
+    }
+
+    return (
+      <input
+        type={
+          field.type === "date" ? "date" : field.type === "time" ? "time" : "text"
+        }
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        style={inlineInputStyle}
+      />
+    );
+  }
+
+  function toggleRowSelection(rowId: string) {
+    setSelectedRowIds((current) =>
+      current.includes(rowId)
+        ? current.filter((id) => id !== rowId)
+        : [...current, rowId]
+    );
+  }
+
+  function toggleAllVisibleRows() {
+    if (allVisibleSelected) {
+      setSelectedRowIds([]);
+      return;
+    }
+
+    setSelectedRowIds(processedRows.map((row) => String(row.id)));
+  }
+
+  async function bulkUpdate() {
+    if (selectedRowIds.length === 0) return;
+
+    const field = getField(bulkUpdateFieldKey);
+    if (!field) return;
+
+    let value: string | number | boolean | null = bulkUpdateValue;
+
+    if (field.type === "employee" || field.type === "number") {
+      value = valueToNumberOrNull(bulkUpdateValue);
+    }
+
+    if (field.type === "boolean") {
+      value = bulkUpdateValue === "Yes";
+    }
+
+    if ((field.type === "date" || field.type === "time") && !bulkUpdateValue) {
+      value = null;
+    }
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from("tasks")
+      .update({ [bulkUpdateFieldKey]: value })
+      .in("id", selectedRowIds);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Selected tasks updated.");
+    setSelectedRowIds([]);
+    await loadEverything();
+  }
+
+  async function bulkDuplicate() {
+    if (selectedRows.length === 0) return;
+
+    const copies = selectedRows.map((row) => {
+      const copy = { ...row };
+      delete copy.id;
+      delete copy.created_at;
+
+      copy.task_title = `${row.task_title || "Task"} Copy`;
+      copy.status = "To Do";
+
+      return cleanPayload(copy);
+    });
+
+    const supabase = createClient();
+    const { error } = await supabase.from("tasks").insert(copies);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Selected tasks duplicated.");
+    setSelectedRowIds([]);
+    await loadEverything();
+  }
+
+  async function bulkDelete() {
+    if (selectedRows.length === 0) return;
+
+    const blockedRows = selectedRows.filter((row) => {
+      const taskId = Number(row.id);
+
+      return (
+        deliverables.some((item) => Number(item.linked_task) === taskId) ||
+        issues.some((item) => Number(item.linked_task) === taskId)
+      );
+    });
+
+    if (blockedRows.length > 0) {
+      setErrorMessage(
+        `${blockedRows.length} selected task(s) have linked deliverables or issues. Unlink those records before deleting.`
+      );
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${selectedRows.length} selected task(s)? This cannot be undone.`
+    );
+
+    if (!confirmed) return;
+
+    const supabase = createClient();
+
+    const { error } = await supabase
+      .from("tasks")
+      .delete()
+      .in("id", selectedRowIds);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage("Selected tasks deleted.");
+    setSelectedRowIds([]);
+    await loadEverything();
+  }
+
+  function exportCsv() {
+    const headers = fieldDefinitions.map((field) => field.key);
+    const csvRows = [
+      headers.join(","),
+      ...processedRows.map((row) =>
+        headers.map((header) => escapeCsvValue(row[header])).join(",")
+      ),
+    ];
+
+    const blob = new Blob([csvRows.join("\n")], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = "tasks-export.csv";
+    link.click();
+
+    URL.revokeObjectURL(url);
+  }
+
+  async function importCsv(file: File) {
+    const text = await file.text();
+    const parsed = parseCsv(text);
+
+    if (parsed.rows.length === 0) {
+      setErrorMessage("No rows found in the CSV file.");
+      return;
+    }
+
+    const payloads = parsed.rows.map((row) =>
+      cleanPayload({
+        ...initialDraft,
+        ...row,
+        assigned_to: row.assigned_to || null,
+        recurrence_interval: row.recurrence_interval
+          ? Number(row.recurrence_interval)
+          : 1,
+        skip_weekends: valueToBoolean(row.skip_weekends),
+      })
+    );
+
+    const supabase = createClient();
+
+    const { error } = await supabase.from("tasks").insert(payloads);
+
+    if (error) {
+      setErrorMessage(error.message);
+      return;
+    }
+
+    setMessage(`${payloads.length} task(s) imported.`);
+    await loadEverything();
+  }
+
+  function changeVisibleField(key: string) {
+    setVisibleFieldKeys((current) => {
+      if (current.includes(key)) {
+        if (current.length === 1) return current;
+        return current.filter((item) => item !== key);
+      }
+
+      return [...current, key];
+    });
+  }
+
+  function moveVisibleField(key: string, direction: "up" | "down") {
+    setVisibleFieldKeys((current) => {
+      const index = current.indexOf(key);
+
+      if (index === -1) return current;
+
+      const nextIndex = direction === "up" ? index - 1 : index + 1;
+
+      if (nextIndex < 0 || nextIndex >= current.length) return current;
+
+      const copy = [...current];
+      const item = copy[index];
+
+      copy[index] = copy[nextIndex];
+      copy[nextIndex] = item;
+
+      return copy;
+    });
+  }
+
+  function linkedDeliverablesForTask(taskId: string | number | null | undefined) {
+    return deliverables.filter(
+      (item) => Number(item.linked_task) === Number(taskId)
+    );
+  }
+
+  function linkedIssuesForTask(taskId: string | number | null | undefined) {
+    return issues.filter((item) => Number(item.linked_task) === Number(taskId));
+  }
+
+  function renderModal() {
+    if (!modalMode) return null;
+
+    const readOnly = modalMode === "open";
+    const title =
+      modalMode === "add"
+        ? "Add Task"
+        : modalMode === "edit"
+          ? "Edit Task"
+          : "Open Task";
+
+    const linkedDeliverableRecords = activeRecord
+      ? linkedDeliverablesForTask(activeRecord.id)
+      : [];
+    const linkedIssueRecords = activeRecord
+      ? linkedIssuesForTask(activeRecord.id)
+      : [];
+
+    return (
+      <div style={modalBackdropStyle}>
+        <div style={largeModalStyle}>
+          <header style={modalHeaderStyle}>
+            <div>
+              <div style={eyebrowStyle}>TASK MANAGER</div>
+              <h2 style={modalTitleStyle}>{title}</h2>
+              <p style={modalIntroStyle}>
+                {readOnly
+                  ? "Read-only review. Use Edit if you need to change this task."
+                  : "Complete the sections below. Every field includes a description."}
+              </p>
+            </div>
+
+            <button type="button" onClick={closeModal} style={closeButtonStyle}>
+              Close
+            </button>
+          </header>
+
+          <div style={modalFormStyle}>
+            <FormSection
+              number="1"
+              title="Task Details"
+              help="Name the task, assign ownership, and classify the work."
+            >
+              <div style={formGridStyle}>
+                {[
+                  "task_title",
+                  "status",
+                  "priority",
+                  "assigned_to",
+                  "task_type",
+                  "function_area",
+                ].map((key) => (
+                  <FieldInput
+                    key={key}
+                    field={getField(key)!}
+                    value={draft[key]}
+                    readOnly={readOnly}
+                    employees={employees}
+                    onChange={(value) => updateDraft(key, value)}
+                  />
+                ))}
+              </div>
+            </FormSection>
+
+            <FormSection
+              number="2"
+              title="Due Date"
+              help="Pick a due date. Use the repeating task pop-up when this task should happen again."
+            >
+              <DueDateRepeatEditor
+                draft={draft}
+                readOnly={readOnly}
+                onChange={updateDraft}
+              />
+            </FormSection>
+
+            <FormSection
+              number="3"
+              title="Linked Records"
+              help="These records are connected to this task. Deleting a task is blocked when links exist."
+            >
+              <div style={linkedGridStyle}>
+                <div style={infoBoxStyle}>
+                  <div style={infoLabelStyle}>Linked Deliverables</div>
+                  {linkedDeliverableRecords.length === 0 ? (
+                    <div style={infoValueStyle}>No linked deliverables.</div>
+                  ) : (
+                    linkedDeliverableRecords.map((deliverable) => (
+                      <a
+                        key={deliverable.id}
+                        href="/deliverables-list"
+                        style={linkedItemStyle}
+                      >
+                        {deliverable.deliverable_name ||
+                          `Deliverable #${deliverable.id}`}
+                      </a>
+                    ))
+                  )}
+                </div>
+
+                <div style={infoBoxStyle}>
+                  <div style={infoLabelStyle}>Linked Issues</div>
+                  {linkedIssueRecords.length === 0 ? (
+                    <div style={infoValueStyle}>No linked issues.</div>
+                  ) : (
+                    linkedIssueRecords.map((issue) => (
+                      <a key={issue.id} href="/issues-list" style={linkedItemStyle}>
+                        {issue.issue_name || `Issue #${issue.id}`}
+                      </a>
+                    ))
+                  )}
+                </div>
+              </div>
+            </FormSection>
+
+            <FormSection
+              number="4"
+              title="Instructions"
+              help="Add task instructions, AI prompt support, and notes."
+            >
+              <div style={formGridOneStyle}>
+                {["ai_prompt_tool_link", "description", "notes"].map((key) => (
+                  <FieldInput
+                    key={key}
+                    field={getField(key)!}
+                    value={draft[key]}
+                    readOnly={readOnly}
+                    employees={employees}
+                    onChange={(value) => updateDraft(key, value)}
+                  />
+                ))}
+              </div>
+            </FormSection>
+          </div>
+
+          <footer style={modalFooterStyle}>
+            {modalMode === "open" && activeRecord ? (
+              <button
+                type="button"
+                onClick={() => setModalMode("edit")}
+                style={primaryButtonStyle}
+              >
+                Edit Task
+              </button>
+            ) : null}
+
+            {modalMode !== "open" ? (
+              <button type="button" onClick={saveRecord} style={primaryButtonStyle}>
+                {modalMode === "add" ? "Save Task" : "Save Changes"}
+              </button>
+            ) : null}
+
+            <button type="button" onClick={closeModal} style={secondaryButtonStyle}>
+              Cancel
+            </button>
+          </footer>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <main style={pageStyle} onClick={() => setRowActionMenuId(null)}>
+      <header style={headerStyle}>
+        <div>
+          <a href="/?table=tasks" style={backLinkStyle}>
+            ← Back to Tasks
+          </a>
+
+          <div style={eyebrowStyle}>PRACTICE FOUNDER · TASK MANAGEMENT</div>
+          <h1 style={titleStyle}>Tasks Manager</h1>
+          <p style={descriptionStyle}>
+            Manage tasks, ownership, deadlines, repeating work, linked deliverables,
+            linked issues, bulk actions, imports, exports, filters, sorting, and
+            table fields.
+          </p>
+        </div>
+
+        <button type="button" onClick={openAddModal} style={addButtonStyle}>
+          + Add Task
+        </button>
+      </header>
+
+      {message ? <div style={successStyle}>{message}</div> : null}
+      {errorMessage ? <div style={errorStyle}>{errorMessage}</div> : null}
+
+      <section style={kpiGridStyle}>
+        {kpis.map((kpi) => (
+          <article key={kpi.label} style={kpiCardStyle} title={kpi.help}>
+            <div style={kpiLabelStyle}>{kpi.label}</div>
+            <div style={kpiValueStyle}>{kpi.value}</div>
+            <p style={kpiHelpStyle}>{kpi.help}</p>
+          </article>
+        ))}
+      </section>
+
+      <section style={tableCardStyle}>
+        <div style={toolbarStyle}>
+          <div style={searchBoxStyle}>
+            <span>Search</span>
+            <input
+              value={searchText}
+              onChange={(event) => setSearchText(event.target.value)}
+              placeholder="Search tasks..."
+              style={searchInputStyle}
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setFilterOpen((value) => !value)}
+            style={filterOpen ? activeMenuButtonStyle : menuButtonStyle}
+          >
+            Filter
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSortOpen((value) => !value)}
+            style={sortOpen ? activeMenuButtonStyle : menuButtonStyle}
+          >
+            Sort
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setGroupOpen((value) => !value)}
+            style={groupOpen ? activeMenuButtonStyle : menuButtonStyle}
+          >
+            Group
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setViewOpen((value) => !value)}
+            style={viewOpen ? activeMenuButtonStyle : menuButtonStyle}
+          >
+            View Fields
+          </button>
+
+          <button type="button" onClick={exportCsv} style={menuButtonStyle}>
+            Export
+          </button>
+
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            style={menuButtonStyle}
+          >
+            Import
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv"
+            style={{ display: "none" }}
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+
+              if (file) importCsv(file);
+
+              event.target.value = "";
+            }}
+          />
+
+          <button type="button" onClick={loadEverything} style={refreshButtonStyle}>
+            Refresh
+          </button>
+        </div>
+
+        {filterOpen ? (
+          <div style={menuPanelStyle}>
+            <div style={menuGridStyle}>
+              <FieldSelect
+                label="Filter Field"
+                value={filterFieldKey}
+                options={filterableFieldKeys}
+                onChange={setFilterFieldKey}
+              />
+
+              <label style={fieldStyle}>
+                Filter Value
+                <small style={helpTextStyle}>
+                  Only rows matching this value will show.
+                </small>
+                {renderFilterValueInput()}
+              </label>
+
+              <button
+                type="button"
+                onClick={() => setFilterValue("")}
+                style={secondaryButtonStyle}
+              >
+                Clear Filter
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {sortOpen ? (
+          <div style={menuPanelStyle}>
+            <div style={menuGridStyle}>
+              <FieldSelect
+                label="Sort Field"
+                value={sortFieldKey}
+                options={defaultVisibleFieldKeys}
+                onChange={setSortFieldKey}
+              />
+
+              <label style={fieldStyle}>
+                Direction
+                <small style={helpTextStyle}>Choose ascending or descending.</small>
+                <select
+                  value={sortDirection}
+                  onChange={(event) =>
+                    setSortDirection(event.target.value as "asc" | "desc")
+                  }
+                  style={inputStyle}
+                >
+                  <option value="asc">Ascending</option>
+                  <option value="desc">Descending</option>
+                </select>
+              </label>
+            </div>
+          </div>
+        ) : null}
+
+        {groupOpen ? (
+          <div style={menuPanelStyle}>
+            <div style={menuGridStyle}>
+              <label style={fieldStyle}>
+                Group By
+                <small style={helpTextStyle}>
+                  Group tasks by a selected field inside the manager.
+                </small>
+                <select
+                  value={groupFieldKey}
+                  onChange={(event) => setGroupFieldKey(event.target.value)}
+                  style={inputStyle}
+                >
+                  <option value="none">No grouping</option>
+                  {groupableFieldKeys.map((key) => {
+                    const field = getField(key);
+
+                    return (
+                      <option key={key} value={key}>
+                        {field?.label || key}
+                      </option>
+                    );
+                  })}
+                </select>
+              </label>
+            </div>
+          </div>
+        ) : null}
+
+        {viewOpen ? (
+          <div style={menuPanelStyle}>
+            <div style={viewFieldsGridStyle}>
+              <div style={viewColumnStyle}>
+                <h3 style={viewHeadingStyle}>Available Fields</h3>
+                <p style={viewHelpStyle}>
+                  Add fields to the table. Hover over labels to see definitions.
+                </p>
+
+                {fieldDefinitions
+                  .filter((field) => field.table)
+                  .map((field) => (
+                    <button
+                      key={field.key}
+                      type="button"
+                      title={field.description}
+                      onClick={() => changeVisibleField(field.key)}
+                      style={
+                        visibleFieldKeys.includes(field.key)
+                          ? selectedFieldButtonStyle
+                          : fieldButtonStyle
+                      }
+                    >
+                      {visibleFieldKeys.includes(field.key) ? "✓ " : "+ "}
+                      {field.label}
+                    </button>
+                  ))}
+              </div>
+
+              <div style={viewColumnStyle}>
+                <h3 style={viewHeadingStyle}>
+                  Selected Fields ({visibleFieldKeys.length})
+                </h3>
+                <p style={viewHelpStyle}>
+                  Reorder or remove the fields shown in the table.
+                </p>
+
+                {visibleFieldKeys.map((key) => {
+                  const field = getField(key);
+
+                  if (!field) return null;
+
+                  return (
+                    <div key={key} style={selectedFieldRowStyle}>
+                      <span title={field.description}>{field.label}</span>
+
+                      <div style={selectedFieldControlsStyle}>
+                        <button
+                          type="button"
+                          onClick={() => moveVisibleField(key, "up")}
+                          style={tinyButtonStyle}
+                        >
+                          ↑
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => moveVisibleField(key, "down")}
+                          style={tinyButtonStyle}
+                        >
+                          ↓
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => changeVisibleField(key)}
+                          style={tinyDangerButtonStyle}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {selectedRowIds.length > 0 ? (
+          <div style={bulkToolbarStyle}>
+            <div style={bulkTopRowStyle}>
+              <strong>{selectedRowIds.length} selected</strong>
+
+              <div style={bulkButtonGroupStyle}>
+                <button
+                  type="button"
+                  onClick={bulkDuplicate}
+                  style={secondaryButtonStyle}
+                >
+                  Bulk Duplicate
+                </button>
+
+                <button
+                  type="button"
+                  onClick={bulkDelete}
+                  style={dangerButtonStyle}
+                >
+                  Bulk Delete
+                </button>
+              </div>
+            </div>
+
+            <div style={bulkUpdateGridStyle}>
+              <FieldSelect
+                label="Bulk Update Field"
+                value={bulkUpdateFieldKey}
+                options={fieldDefinitions
+                  .filter((field) => field.bulk)
+                  .map((field) => field.key)}
+                onChange={(value) => {
+                  setBulkUpdateFieldKey(value);
+
+                  const field = getField(value);
+
+                  if (field?.options?.[0]) {
+                    setBulkUpdateValue(field.options[0].value);
+                  } else {
+                    setBulkUpdateValue("");
+                  }
+                }}
+              />
+
+              <label style={fieldStyle}>
+                New Value
+                <small style={helpTextStyle}>Value applied to selected tasks.</small>
+                {renderBulkValueInput()}
+              </label>
+
+              <button type="button" onClick={bulkUpdate} style={primaryButtonStyle}>
+                Apply Bulk Update
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {loading ? (
+          <div style={loadingStyle}>Loading tasks...</div>
+        ) : (
+          <div style={tableWrapStyle}>
+            <table style={tableStyle}>
+              <thead>
+                <tr>
+                  <th style={checkboxHeaderStyle}>
+                    <input
+                      type="checkbox"
+                      checked={allVisibleSelected}
+                      onChange={toggleAllVisibleRows}
+                    />
+                  </th>
+
+                  {visibleFields.map((field) => (
+                    <th
+                      key={field.key}
+                      style={thStyle}
+                      title={`${field.label}: ${field.description}`}
+                    >
+                      {field.label}
+                    </th>
+                  ))}
+
+                  <th style={actionsThStyle}>Actions</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {groupedRows.map((group) => (
+                  <FragmentGroup
+                    key={group.group || "all"}
+                    groupLabel={group.group}
+                    rows={group.rows}
+                    visibleFields={visibleFields}
+                    selectedRowIds={selectedRowIds}
+                    rowActionMenuId={rowActionMenuId}
+                    setRowActionMenuId={setRowActionMenuId}
+                    toggleRowSelection={toggleRowSelection}
+                    renderInlineEditor={renderInlineEditor}
+                    openRecord={openRecord}
+                    editRecord={editRecord}
+                    duplicateRecord={duplicateRecord}
+                    deleteRecord={deleteRecord}
+                  />
+                ))}
+
+                {processedRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={visibleFields.length + 2} style={emptyStateStyle}>
+                      No tasks found. Use + Add Task to create one.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {renderModal()}
+    </main>
+  );
+
+  function renderFilterValueInput() {
+    const field = getField(filterFieldKey);
+
+    if (!field) {
+      return (
+        <input
+          value={filterValue}
+          onChange={(event) => setFilterValue(event.target.value)}
+          style={inputStyle}
+        />
+      );
+    }
+
+    return renderSmallInput(field, filterValue, setFilterValue);
+  }
+
+  function renderBulkValueInput() {
+    const field = getField(bulkUpdateFieldKey);
+
+    if (!field) {
+      return (
+        <input
+          value={bulkUpdateValue}
+          onChange={(event) => setBulkUpdateValue(event.target.value)}
+          style={inputStyle}
+        />
+      );
+    }
+
+    return renderSmallInput(field, bulkUpdateValue, setBulkUpdateValue);
+  }
+}
+
+function DueDateRepeatEditor({
+  draft,
+  readOnly,
+  onChange,
+}: {
+  draft: RowData;
+  readOnly: boolean;
+  onChange: (key: string, value: string | number | boolean | null) => void;
+}) {
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [calendarDate, setCalendarDate] = useState(() => {
+    if (draft.due_date) {
+      return new Date(`${String(draft.due_date).split("T")[0]}T12:00:00`);
+    }
+
+    return new Date();
+  });
+
+  const calendarDays = useMemo(() => getMonthDays(calendarDate), [calendarDate]);
+  const isRepeating = String(draft.due_date_type || "Standard") === "Repeating";
+
+  if (readOnly) {
+    return (
+      <div style={linkedGridStyle}>
+        <div style={infoBoxStyle}>
+          <div style={infoLabelStyle}>Due Date</div>
+          <div style={infoValueStyle}>{formatDate(draft.due_date)}</div>
+          <small style={infoHelperStyle}>The date the task should be completed.</small>
+        </div>
+
+        <div style={infoBoxStyle}>
+          <div style={infoLabelStyle}>Due Time</div>
+          <div style={infoValueStyle}>{formatTime(draft.due_time)}</div>
+          <small style={infoHelperStyle}>Optional time the task should be completed.</small>
+        </div>
+
+        <div style={infoBoxStyle}>
+          <div style={infoLabelStyle}>Repeat</div>
+          <div style={infoValueStyle}>{String(draft.due_date_type || "Standard")}</div>
+          <small style={infoHelperStyle}>
+            {isRepeating
+              ? `${draft.recurrence_frequency || "Monthly"} · ${draft.recurrence_days || "No rule"}`
+              : "This task does not repeat."}
+          </small>
+        </div>
+      </div>
+    );
+  }
+
+  function moveMonth(direction: "previous" | "next") {
+    setCalendarDate((current) => {
+      const next = new Date(current);
+      next.setMonth(current.getMonth() + (direction === "next" ? 1 : -1));
+      return next;
+    });
+  }
+
+  function chooseCalendarDay(day: number) {
+    const selectedDate = new Date(
+      calendarDate.getFullYear(),
+      calendarDate.getMonth(),
+      day
+    );
+
+    const value = toDateInputValue(selectedDate);
+
+    onChange("due_date", value);
+
+    if (!draft.recurrence_end_date) {
+      onChange("recurrence_end_date", value);
+    }
+  }
+
+  function toggleRepeating() {
+    if (isRepeating) {
+      onChange("due_date_type", "Standard");
+      return;
+    }
+
+    onChange("due_date_type", "Repeating");
+  }
+
+  return (
+    <div style={managerDateFieldWrapStyle}>
+      <button
+        type="button"
+        onClick={() => setPopoverOpen(true)}
+        style={managerDateButtonStyle}
+      >
+        <span>
+          <strong>Due Date</strong>
+          <small style={managerDateHelpStyle}>
+            Click to open calendar and repeat settings.
+          </small>
+        </span>
+
+        <span style={managerDateBadgeStyle}>
+          {draft.due_date ? formatDateLabel(draft.due_date) : "Choose Date"}
+        </span>
+      </button>
+
+      <label style={managerTimeFieldStyle}>
+        Due Time
+        <small style={helpTextStyle}>
+          Optional time the task should be completed by.
+        </small>
+        <input
+          type="time"
+          value={String(draft.due_time || "")}
+          onChange={(event) => onChange("due_time", event.target.value)}
+          style={inputStyle}
+        />
+      </label>
+
+      {popoverOpen ? (
+        <div style={managerDateBackdropStyle}>
+          <div style={managerDatePopoverStyle}>
+            <aside style={managerRepeatSideStyle}>
+              <div style={managerRepeatHeaderStyle}>
+                <h3 style={managerRepeatTitleStyle}>Repeating Task</h3>
+
+                <button
+                  type="button"
+                  onClick={toggleRepeating}
+                  style={
+                    isRepeating
+                      ? managerSwitchActiveStyle
+                      : managerSwitchStyle
+                  }
+                  aria-label="Toggle repeating task"
+                >
+                  <span
+                    style={
+                      isRepeating
+                        ? managerSwitchKnobActiveStyle
+                        : managerSwitchKnobStyle
+                    }
+                  />
+                </button>
+              </div>
+
+              <div style={managerRepeatRowStyle}>
+                <label style={managerCompactLabelStyle}>
+                  Repeats
+                  <span
+                    title="How often this task should repeat."
+                    style={managerSmallInfoIconStyle}
+                  >
+                    i
+                  </span>
+                </label>
+
+                <select
+                  value={String(draft.recurrence_frequency || "Monthly")}
+                  onChange={(event) =>
+                    onChange("recurrence_frequency", event.target.value)
+                  }
+                  disabled={!isRepeating}
+                  style={managerCompactSelectStyle}
+                >
+                  {recurrenceFrequencyOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+
+                <small style={managerSmallHelpStyle}>
+                  {getOptionDescription(
+                    recurrenceFrequencyOptions,
+                    draft.recurrence_frequency || "Monthly"
+                  )}
+                </small>
+              </div>
+
+              <div style={managerRepeatRowStyle}>
+                <label style={managerCompactLabelStyle}>Repeat Rule</label>
+
+                <select
+                  value={String(draft.recurrence_days || "First Friday")}
+                  onChange={(event) => {
+                    onChange("recurrence_days", event.target.value);
+                    onChange("recurrence_monthly_rule", event.target.value);
+                  }}
+                  disabled={!isRepeating}
+                  style={managerCompactSelectStyle}
+                >
+                  {recurrenceRuleOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+
+                <small style={managerSmallHelpStyle}>
+                  {getOptionDescription(
+                    recurrenceRuleOptions,
+                    draft.recurrence_days || "First Friday"
+                  )}
+                </small>
+              </div>
+
+              <div style={managerDividerStyle} />
+
+              <div style={managerRepeatRowStyle}>
+                <label style={managerCompactLabelStyle}>
+                  Create new task
+                  <small style={managerMutedSmallStyle}>
+                    when status is set to completed
+                  </small>
+                </label>
+
+                <select
+                  value={String(draft.create_next_when || "Complete")}
+                  onChange={(event) =>
+                    onChange("create_next_when", event.target.value)
+                  }
+                  disabled={!isRepeating}
+                  style={managerCompactSelectStyle}
+                >
+                  {createNextWhenOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={managerDividerStyle} />
+
+              <div style={managerRepeatInlineRowStyle}>
+                <span style={managerCompactLabelStyle}>Set Status to</span>
+
+                <select
+                  value={String(draft.next_task_status || "To Do")}
+                  onChange={(event) =>
+                    onChange("next_task_status", event.target.value)
+                  }
+                  disabled={!isRepeating}
+                  style={managerStatusPillSelectStyle}
+                >
+                  {statusOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div style={managerDividerStyle} />
+
+              <div style={managerRepeatInlineRowStyle}>
+                <span style={managerCompactLabelStyle}>Fields to Copy</span>
+
+                <select
+                  value={String(draft.recurrence_fields_to_copy || "All Fields")}
+                  onChange={(event) =>
+                    onChange("recurrence_fields_to_copy", event.target.value)
+                  }
+                  disabled={!isRepeating}
+                  style={managerPlainSelectStyle}
+                >
+                  {copyFieldsOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </aside>
+
+            <section style={managerCalendarSideStyle}>
+              <div style={managerCalendarTopStyle}>
+                <div style={managerDateHeaderBlockStyle}>
+                  <span style={managerDateHeaderLabelStyle}>Start Date</span>
+                  <strong style={managerDateHeaderValueStyle}>
+                    {formatDateLabel(draft.due_date)}
+                  </strong>
+                </div>
+
+                <div style={managerDateHeaderBlockStyle}>
+                  <span style={managerDateHeaderLabelStyle}>End Date</span>
+                  <strong style={managerDateHeaderValueStyle}>
+                    {formatDateLabel(draft.recurrence_end_date || draft.due_date)}
+                  </strong>
+                </div>
+              </div>
+
+              <div style={managerCalendarNavStyle}>
+                <button
+                  type="button"
+                  onClick={() => moveMonth("previous")}
+                  style={managerCalendarArrowStyle}
+                >
+                  ←
+                </button>
+
+                <strong>{formatMonthYear(calendarDate)}</strong>
+
+                <button
+                  type="button"
+                  onClick={() => moveMonth("next")}
+                  style={managerCalendarArrowStyle}
+                >
+                  →
+                </button>
+              </div>
+
+              <div style={managerCalendarGridStyle}>
+                {["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => (
+                  <div key={day} style={managerWeekdayStyle}>
+                    {day}
+                  </div>
+                ))}
+
+                {calendarDays.map((day, index) => {
+                  const selectedDate =
+                    day !== null
+                      ? toDateInputValue(
+                          new Date(
+                            calendarDate.getFullYear(),
+                            calendarDate.getMonth(),
+                            day
+                          )
+                        )
+                      : "";
+
+                  const isSelected = selectedDate === String(draft.due_date || "");
+
+                  return (
+                    <button
+                      key={`${day || "blank"}-${index}`}
+                      type="button"
+                      disabled={day === null}
+                      onClick={() => {
+                        if (day !== null) chooseCalendarDay(day);
+                      }}
+                      style={
+                        day === null
+                          ? managerBlankDayStyle
+                          : isSelected
+                            ? managerSelectedDayStyle
+                            : managerDayButtonStyle
+                      }
+                    >
+                      {day || ""}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div style={managerCalendarFooterStyle}>
+                <button
+                  type="button"
+                  style={managerIconButtonStyle}
+                  title="Repeat settings"
+                  onClick={() => onChange("due_date_type", "Repeating")}
+                >
+                  ↻
+                </button>
+
+                <div style={{ flex: 1 }} />
+
+                <button
+                  type="button"
+                  onClick={() => setPopoverOpen(false)}
+                  style={managerCalendarCancelButtonStyle}
+                >
+                  Cancel
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setPopoverOpen(false)}
+                  style={managerCalendarDoneButtonStyle}
+                >
+                  Done
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function FragmentGroup({
+  groupLabel,
+  rows,
+  visibleFields,
+  selectedRowIds,
+  rowActionMenuId,
+  setRowActionMenuId,
+  toggleRowSelection,
+  renderInlineEditor,
+  openRecord,
+  editRecord,
+  duplicateRecord,
+  deleteRecord,
+}: {
+  groupLabel: string;
+  rows: RowData[];
+  visibleFields: FieldDefinition[];
+  selectedRowIds: string[];
+  rowActionMenuId: string | null;
+  setRowActionMenuId: (id: string | null) => void;
+  toggleRowSelection: (id: string) => void;
+  renderInlineEditor: (row: RowData, field: FieldDefinition) => ReactNode;
+  openRecord: (row: RowData) => void;
+  editRecord: (row: RowData) => void;
+  duplicateRecord: (row: RowData) => void;
+  deleteRecord: (row: RowData) => void;
+}) {
+  return (
+    <>
+      {groupLabel ? (
+        <tr>
+          <td colSpan={visibleFields.length + 2} style={groupRowStyle}>
+            {groupLabel} · {rows.length}
+          </td>
+        </tr>
+      ) : null}
+
+      {rows.map((row) => (
+        <tr key={String(row.id)} style={trStyle}>
+          <td style={checkboxCellStyle}>
+            <input
+              type="checkbox"
+              checked={selectedRowIds.includes(String(row.id))}
+              onChange={() => toggleRowSelection(String(row.id))}
+            />
+          </td>
+
+          {visibleFields.map((field) => (
+            <td key={field.key} style={tdStyle}>
+              {renderInlineEditor(row, field)}
+            </td>
+          ))}
+
+          <td style={tdStyle}>
+            <div style={actionMenuWrapStyle}>
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setRowActionMenuId(
+                    rowActionMenuId === String(row.id) ? null : String(row.id)
+                  );
+                }}
+                style={actionMenuButtonStyle}
+              >
+                ⋯
+              </button>
+
+              {rowActionMenuId === String(row.id) ? (
+                <div
+                  style={actionDropdownStyle}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <button
+                    type="button"
+                    onClick={() => openRecord(row)}
+                    style={actionDropdownButtonStyle}
+                  >
+                    Open
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => editRecord(row)}
+                    style={actionDropdownButtonStyle}
+                  >
+                    Edit
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => duplicateRecord(row)}
+                    style={actionDropdownButtonStyle}
+                  >
+                    Duplicate
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => deleteRecord(row)}
+                    style={actionDropdownDangerButtonStyle}
+                  >
+                    Delete
+                  </button>
+                </div>
+              ) : null}
+            </div>
+          </td>
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function FormSection({
+  number,
+  title,
+  help,
+  children,
+}: {
+  number: string;
+  title: string;
+  help: string;
+  children: ReactNode;
+}) {
+  return (
+    <section style={formSectionStyle}>
+      <div style={formSectionHeaderStyle}>
+        <div>
+          <div style={sectionEyebrowStyle}>SECTION {number}</div>
+          <h3 style={formSectionTitleStyle}>{title}</h3>
+        </div>
+
+        <p style={sectionHelpStyle}>{help}</p>
+      </div>
+
+      {children}
+    </section>
+  );
+}
+
+function FieldInput({
+  field,
+  value,
+  readOnly,
+  employees,
+  onChange,
+}: {
+  field: FieldDefinition;
+  value: string | number | boolean | null | undefined;
+  readOnly: boolean;
+  employees: Employee[];
+  onChange: (value: string | number | boolean | null) => void;
+}) {
+  const optionDescription = getOptionDescription(field.options, value);
+
+  if (readOnly) {
+    return (
+      <div style={infoBoxStyle}>
+        <div style={infoLabelStyle}>{field.label}</div>
+        <div style={infoValueStyle}>
+          {field.type === "employee"
+            ? employees.find((employee) => employee.id === Number(value))?.name ||
+              "-"
+            : field.type === "boolean"
+              ? booleanToYesNo(value)
+              : field.type === "date"
+                ? formatDate(value)
+                : field.type === "time"
+                  ? formatTime(value)
+                  : String(value || "-")}
+        </div>
+        <small style={infoHelperStyle}>{field.description}</small>
+      </div>
+    );
+  }
+
+  return (
+    <label style={fieldStyle}>
+      {field.label}
+      <small style={helpTextStyle}>{field.description}</small>
+
+      {field.type === "textarea" ? (
+        <textarea
+          value={String(value || "")}
+          onChange={(event) => onChange(event.target.value)}
+          style={textareaStyle}
+        />
+      ) : null}
+
+      {field.type === "select" || field.type === "boolean" ? (
+        <select
+          value={
+            field.type === "boolean" ? booleanToYesNo(value) : String(value || "")
+          }
+          onChange={(event) =>
+            field.type === "boolean"
+              ? onChange(event.target.value === "Yes")
+              : onChange(event.target.value)
+          }
+          style={inputStyle}
+        >
+          <option value="">Select</option>
+          {(field.type === "boolean" ? yesNoOptions : field.options || []).map(
+            (option) => (
+              <option
+                key={option.value}
+                value={option.value}
+                title={option.description}
+              >
+                {option.label}
+              </option>
+            )
+          )}
+        </select>
+      ) : null}
+
+      {field.type === "employee" ? (
+        <select
+          value={String(value || "")}
+          onChange={(event) =>
+            onChange(event.target.value ? Number(event.target.value) : null)
+          }
+          style={inputStyle}
+        >
+          <option value="">Select employee</option>
+          {employees.map((employee) => (
+            <option key={employee.id} value={employee.id}>
+              {employee.name || `Employee #${employee.id}`}
+            </option>
+          ))}
+        </select>
+      ) : null}
+
+      {["text", "date", "time", "number", "url"].includes(field.type) ? (
+        <input
+          type={
+            field.type === "number"
+              ? "number"
+              : field.type === "date"
+                ? "date"
+                : field.type === "time"
+                  ? "time"
+                  : field.type === "url"
+                    ? "url"
+                    : "text"
+          }
+          value={String(value || "")}
+          onChange={(event) =>
+            field.type === "number"
+              ? onChange(event.target.value ? Number(event.target.value) : null)
+              : onChange(event.target.value)
+          }
+          style={inputStyle}
+        />
+      ) : null}
+
+      {optionDescription ? (
+        <small style={optionHelpStyle}>{optionDescription}</small>
+      ) : null}
+    </label>
+  );
+}
+
+function FieldSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label style={fieldStyle}>
+      {label}
+      <small style={helpTextStyle}>Choose the field to use.</small>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        style={inputStyle}
+      >
+        {options.map((key) => {
+          const field = getField(key);
+
+          return (
+            <option key={key} value={key}>
+              {field?.label || key}
+            </option>
+          );
+        })}
+      </select>
+    </label>
+  );
+}
+
+const colors = {
+  navy: "#1C2333",
+  navyLight: "#232D42",
+  gold: "#C9A84C",
+  goldPale: "#F5EDD8",
+  cream: "#F8F5EE",
+  white: "#FFFFFF",
+  slate: "#5F6673",
+  border: "#DED8C8",
+  red: "#9F1239",
+  green: "#166534",
+  orange: "#FF6B2C",
+};
+
+const pageStyle: CSSProperties = {
+  minHeight: "100vh",
+  background: colors.cream,
+  color: colors.navy,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+  padding: "34px",
+};
+
+const headerStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "24px",
+  marginBottom: "22px",
+};
+
+const backLinkStyle: CSSProperties = {
+  display: "inline-block",
+  marginBottom: "16px",
+  color: colors.navy,
+  textDecoration: "none",
+  fontWeight: 800,
+};
+
+const eyebrowStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "11px",
+  letterSpacing: "0.16em",
+  textTransform: "uppercase",
+};
+
+const titleStyle: CSSProperties = {
+  margin: "8px 0 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "42px",
+  fontWeight: 600,
+};
+
+const descriptionStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "16px",
+  maxWidth: "900px",
+  lineHeight: 1.6,
+};
+
+const addButtonStyle: CSSProperties = {
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "12px",
+  padding: "14px 18px",
+  fontWeight: 900,
+  height: "fit-content",
+  cursor: "pointer",
+};
+
+const successStyle: CSSProperties = {
+  background: "#ecfdf5",
+  color: colors.green,
+  border: "1px solid #bbf7d0",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const errorStyle: CSSProperties = {
+  background: "#fff1f2",
+  color: colors.red,
+  border: "1px solid #fecdd3",
+  padding: "14px",
+  marginBottom: "16px",
+};
+
+const kpiGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+  gap: "14px",
+  marginBottom: "18px",
+};
+
+const kpiCardStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "18px",
+  boxShadow: "0 12px 30px rgba(28,35,51,0.05)",
+};
+
+const kpiLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+};
+
+const kpiValueStyle: CSSProperties = {
+  fontSize: "34px",
+  fontWeight: 900,
+  marginTop: "6px",
+};
+
+const kpiHelpStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "12px",
+  lineHeight: 1.4,
+};
+
+const tableCardStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 18px 42px rgba(28,35,51,0.06)",
+};
+
+const toolbarStyle: CSSProperties = {
+  minHeight: "54px",
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  padding: "10px 14px",
+  borderBottom: `1px solid ${colors.border}`,
+  flexWrap: "wrap",
+};
+
+const searchBoxStyle: CSSProperties = {
+  height: "34px",
+  minWidth: "260px",
+  display: "flex",
+  alignItems: "center",
+  gap: "8px",
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+};
+
+const searchInputStyle: CSSProperties = {
+  border: "none",
+  outline: "none",
+  width: "100%",
+  background: "transparent",
+  color: colors.navy,
+};
+
+const refreshButtonStyle: CSSProperties = {
+  height: "34px",
+  border: "none",
+  background: colors.navy,
+  color: colors.white,
+  borderRadius: "8px",
+  padding: "0 14px",
+  fontWeight: 800,
+  cursor: "pointer",
+  marginLeft: "auto",
+};
+
+const menuButtonStyle: CSSProperties = {
+  height: "34px",
+  border: `1px solid ${colors.border}`,
+  background: colors.white,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "0 12px",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const activeMenuButtonStyle: CSSProperties = {
+  ...menuButtonStyle,
+  background: colors.goldPale,
+  borderColor: colors.gold,
+};
+
+const menuPanelStyle: CSSProperties = {
+  padding: "12px 14px",
+  borderBottom: `1px solid ${colors.border}`,
+  background: colors.cream,
+};
+
+const menuGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr auto",
+  gap: "12px",
+  alignItems: "end",
+};
+
+const viewFieldsGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: "16px",
+};
+
+const viewColumnStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "14px",
+  display: "grid",
+  gap: "8px",
+};
+
+const viewHeadingStyle: CSSProperties = {
+  margin: 0,
+  fontSize: "18px",
+};
+
+const viewHelpStyle: CSSProperties = {
+  margin: 0,
+  color: colors.slate,
+  fontSize: "12px",
+};
+
+const fieldButtonStyle: CSSProperties = {
+  border: `1px solid ${colors.border}`,
+  background: colors.white,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "9px 10px",
+  textAlign: "left",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const selectedFieldButtonStyle: CSSProperties = {
+  ...fieldButtonStyle,
+  background: colors.goldPale,
+  borderColor: colors.gold,
+};
+
+const selectedFieldRowStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "8px",
+  alignItems: "center",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "8px",
+};
+
+const selectedFieldControlsStyle: CSSProperties = {
+  display: "flex",
+  gap: "6px",
+};
+
+const tinyButtonStyle: CSSProperties = {
+  border: `1px solid ${colors.border}`,
+  background: colors.white,
+  color: colors.navy,
+  borderRadius: "6px",
+  padding: "4px 7px",
+  cursor: "pointer",
+  fontWeight: 800,
+};
+
+const tinyDangerButtonStyle: CSSProperties = {
+  ...tinyButtonStyle,
+  color: colors.red,
+};
+
+const bulkToolbarStyle: CSSProperties = {
+  display: "grid",
+  gap: "12px",
+  padding: "12px 14px",
+  background: colors.goldPale,
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const bulkTopRowStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: "12px",
+};
+
+const bulkButtonGroupStyle: CSSProperties = {
+  display: "flex",
+  gap: "8px",
+};
+
+const bulkUpdateGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr auto",
+  gap: "12px",
+  alignItems: "end",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "12px",
+};
+
+const loadingStyle: CSSProperties = {
+  padding: "30px",
+  color: colors.slate,
+};
+
+const tableWrapStyle: CSSProperties = {
+  overflowX: "auto",
+};
+
+const tableStyle: CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+  fontSize: "14px",
+};
+
+const checkboxHeaderStyle: CSSProperties = {
+  width: "42px",
+  padding: "14px",
+  background: colors.cream,
+  borderBottom: `1px solid ${colors.border}`,
+  textAlign: "center",
+};
+
+const checkboxCellStyle: CSSProperties = {
+  width: "42px",
+  padding: "16px",
+  borderBottom: `1px solid ${colors.border}`,
+  textAlign: "center",
+};
+
+const thStyle: CSSProperties = {
+  textAlign: "left",
+  padding: "14px 16px",
+  background: colors.cream,
+  color: colors.navy,
+  borderBottom: `1px solid ${colors.border}`,
+  fontSize: "11px",
+  textTransform: "uppercase",
+  letterSpacing: "0.1em",
+  fontFamily: "var(--font-dm-mono), monospace",
+  whiteSpace: "nowrap",
+};
+
+const actionsThStyle: CSSProperties = {
+  ...thStyle,
+  width: "90px",
+};
+
+const trStyle: CSSProperties = {
+  background: colors.white,
+};
+
+const groupRowStyle: CSSProperties = {
+  padding: "10px 16px",
+  background: colors.goldPale,
+  color: colors.navy,
+  fontWeight: 900,
+  borderBottom: `1px solid ${colors.border}`,
+};
+
+const tdStyle: CSSProperties = {
+  padding: "13px 16px",
+  borderBottom: `1px solid ${colors.border}`,
+  verticalAlign: "top",
+  color: colors.navy,
+  whiteSpace: "nowrap",
+};
+
+const editableCellButtonStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: colors.navy,
+  padding: 0,
+  cursor: "pointer",
+  fontWeight: 800,
+  textAlign: "left",
+  textDecoration: "underline",
+  textDecorationColor: colors.gold,
+  textUnderlineOffset: "4px",
+};
+
+const inlineEditWrapStyle: CSSProperties = {
+  display: "flex",
+  gap: "6px",
+  alignItems: "center",
+  minWidth: "260px",
+};
+
+const inlineInputStyle: CSSProperties = {
+  height: "34px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 8px",
+  color: colors.navy,
+  background: colors.white,
+};
+
+const miniSaveButtonStyle: CSSProperties = {
+  height: "34px",
+  border: "none",
+  background: colors.gold,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "0 9px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const miniCancelButtonStyle: CSSProperties = {
+  height: "34px",
+  border: "none",
+  background: colors.goldPale,
+  color: colors.navy,
+  borderRadius: "8px",
+  padding: "0 9px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const emptyStateStyle: CSSProperties = {
+  padding: "34px",
+  textAlign: "center",
+  color: colors.slate,
+};
+
+const actionMenuWrapStyle: CSSProperties = {
+  position: "relative",
+  display: "inline-block",
+};
+
+const actionMenuButtonStyle: CSSProperties = {
+  width: "34px",
+  height: "34px",
+  borderRadius: "999px",
+  border: `1px solid ${colors.border}`,
+  background: colors.white,
+  color: colors.navy,
+  cursor: "pointer",
+  fontWeight: 900,
+  fontSize: "18px",
+  lineHeight: 1,
+};
+
+const actionDropdownStyle: CSSProperties = {
+  position: "absolute",
+  top: "38px",
+  right: 0,
+  zIndex: 30,
+  minWidth: "170px",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 12px 30px rgba(28,35,51,0.14)",
+  padding: "6px",
+};
+
+const actionDropdownButtonStyle: CSSProperties = {
+  display: "block",
+  width: "100%",
+  border: "none",
+  background: colors.white,
+  color: colors.navy,
+  textAlign: "left",
+  padding: "9px 10px",
+  cursor: "pointer",
+  fontWeight: 700,
+};
+
+const actionDropdownDangerButtonStyle: CSSProperties = {
+  ...actionDropdownButtonStyle,
+  color: colors.red,
+};
+
+const modalBackdropStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 100,
+  background: "rgba(28,35,51,0.54)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "28px",
+};
+
+const largeModalStyle: CSSProperties = {
+  width: "min(1150px, 100%)",
+  maxHeight: "92vh",
+  overflowY: "auto",
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.28)",
+  padding: "24px",
+};
+
+const modalHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "flex-start",
+  gap: "18px",
+  marginBottom: "18px",
+};
+
+const modalTitleStyle: CSSProperties = {
+  margin: "6px 0 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "34px",
+};
+
+const modalIntroStyle: CSSProperties = {
+  color: colors.slate,
+  margin: "8px 0 0",
+};
+
+const closeButtonStyle: CSSProperties = {
+  border: "none",
+  background: colors.navy,
+  color: colors.white,
+  borderRadius: "8px",
+  padding: "10px 12px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const modalFooterStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "flex-end",
+  gap: "10px",
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "16px",
+  position: "sticky",
+  bottom: "0",
+};
+
+const modalFormStyle: CSSProperties = {
+  display: "grid",
+  gap: "18px",
+};
+
+const formSectionStyle: CSSProperties = {
+  background: colors.white,
+  border: `1px solid ${colors.border}`,
+  padding: "20px",
+};
+
+const formSectionHeaderStyle: CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  gap: "16px",
+  borderBottom: `1px solid ${colors.border}`,
+  paddingBottom: "12px",
+  marginBottom: "16px",
+};
+
+const sectionEyebrowStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.16em",
+};
+
+const formSectionTitleStyle: CSSProperties = {
+  margin: "5px 0 0",
+  fontFamily: "var(--font-playfair), serif",
+  fontSize: "26px",
+};
+
+const sectionHelpStyle: CSSProperties = {
+  color: colors.slate,
+  maxWidth: "430px",
+  lineHeight: 1.5,
+  margin: 0,
+};
+
+const formGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gap: "14px",
+  marginBottom: "14px",
+};
+
+const formGridOneStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr",
+  gap: "14px",
+};
+
+const fieldStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  fontWeight: 800,
+};
+
+const helpTextStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "12px",
+  fontWeight: 500,
+  lineHeight: 1.4,
+};
+
+const optionHelpStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "12px",
+  fontWeight: 700,
+  lineHeight: 1.4,
+};
+
+const inputStyle: CSSProperties = {
+  height: "42px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "0 10px",
+  color: colors.navy,
+  background: colors.white,
+};
+
+const textareaStyle: CSSProperties = {
+  minHeight: "140px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "8px",
+  padding: "10px",
+  color: colors.navy,
+  background: colors.white,
+  fontFamily: "var(--font-dm-sans), Arial, sans-serif",
+};
+
+const linkedGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gap: "12px",
+};
+
+const linkedItemStyle: CSSProperties = {
+  display: "block",
+  color: colors.navy,
+  fontWeight: 800,
+  marginTop: "8px",
+  textDecoration: "underline",
+  textDecorationColor: colors.gold,
+  textUnderlineOffset: "4px",
+};
+
+const infoBoxStyle: CSSProperties = {
+  background: colors.cream,
+  border: `1px solid ${colors.border}`,
+  padding: "12px",
+};
+
+const infoLabelStyle: CSSProperties = {
+  color: colors.gold,
+  fontFamily: "var(--font-dm-mono), monospace",
+  fontSize: "10px",
+  letterSpacing: "0.12em",
+  textTransform: "uppercase",
+  marginBottom: "6px",
+};
+
+const infoValueStyle: CSSProperties = {
+  color: colors.navy,
+  fontWeight: 700,
+  whiteSpace: "pre-wrap",
+};
+
+const infoHelperStyle: CSSProperties = {
+  display: "block",
+  marginTop: "8px",
+  color: colors.slate,
+  fontSize: "12px",
+  lineHeight: 1.4,
+};
+
+const primaryButtonStyle: CSSProperties = {
+  background: colors.gold,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "8px",
+  padding: "10px 14px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const secondaryButtonStyle: CSSProperties = {
+  background: colors.goldPale,
+  color: colors.navy,
+  border: "none",
+  borderRadius: "8px",
+  padding: "10px 14px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const dangerButtonStyle: CSSProperties = {
+  background: "#fff1f2",
+  color: colors.red,
+  border: "1px solid #fecdd3",
+  borderRadius: "8px",
+  padding: "10px 14px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const managerDateFieldWrapStyle: CSSProperties = {
+  position: "relative",
+  display: "grid",
+  gridTemplateColumns: "1fr 260px",
+  gap: "16px",
+  alignItems: "start",
+};
+
+const managerDateButtonStyle: CSSProperties = {
+  border: `1px solid ${colors.border}`,
+  background: colors.cream,
+  color: colors.navy,
+  minHeight: "74px",
+  borderRadius: "12px",
+  padding: "14px 16px",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "18px",
+  cursor: "pointer",
+  textAlign: "left",
+};
+
+const managerDateHelpStyle: CSSProperties = {
+  display: "block",
+  marginTop: "4px",
+  color: colors.slate,
+  fontSize: "12px",
+  fontWeight: 500,
+};
+
+const managerDateBadgeStyle: CSSProperties = {
+  background: colors.orange,
+  color: colors.white,
+  padding: "9px 12px",
+  borderRadius: "999px",
+  fontWeight: 900,
+  minWidth: "112px",
+  textAlign: "center",
+};
+
+const managerTimeFieldStyle: CSSProperties = {
+  display: "grid",
+  gap: "6px",
+  fontWeight: 800,
+};
+
+const managerDateBackdropStyle: CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 160,
+  background: "rgba(28,35,51,0.35)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  padding: "24px",
+};
+
+const managerDatePopoverStyle: CSSProperties = {
+  width: "min(900px, 96vw)",
+  minHeight: "560px",
+  display: "grid",
+  gridTemplateColumns: "330px 1fr",
+  background: colors.white,
+  border: `2px solid ${colors.orange}`,
+  boxShadow: "0 30px 80px rgba(0,0,0,0.30)",
+};
+
+const managerRepeatSideStyle: CSSProperties = {
+  borderRight: `1px solid ${colors.border}`,
+  padding: "20px",
+  background: colors.white,
+};
+
+const managerRepeatHeaderStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  marginBottom: "18px",
+};
+
+const managerRepeatTitleStyle: CSSProperties = {
+  margin: 0,
+  fontSize: "18px",
+  fontWeight: 900,
+};
+
+const managerSwitchStyle: CSSProperties = {
+  width: "36px",
+  height: "20px",
+  borderRadius: "999px",
+  border: "none",
+  background: "#D8D8D8",
+  padding: "2px",
+  cursor: "pointer",
+};
+
+const managerSwitchActiveStyle: CSSProperties = {
+  ...managerSwitchStyle,
+  background: colors.orange,
+};
+
+const managerSwitchKnobStyle: CSSProperties = {
+  display: "block",
+  width: "16px",
+  height: "16px",
+  borderRadius: "999px",
+  background: colors.white,
+};
+
+const managerSwitchKnobActiveStyle: CSSProperties = {
+  ...managerSwitchKnobStyle,
+  marginLeft: "16px",
+};
+
+const managerRepeatRowStyle: CSSProperties = {
+  display: "grid",
+  gap: "7px",
+  marginBottom: "14px",
+};
+
+const managerRepeatInlineRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: "14px",
+  marginBottom: "14px",
+};
+
+const managerCompactLabelStyle: CSSProperties = {
+  color: colors.navy,
+  fontSize: "14px",
+  fontWeight: 700,
+};
+
+const managerSmallInfoIconStyle: CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: "14px",
+  height: "14px",
+  borderRadius: "999px",
+  background: "#D8D8D8",
+  color: colors.white,
+  fontSize: "10px",
+  fontWeight: 900,
+  cursor: "help",
+  marginLeft: "5px",
+};
+
+const managerCompactSelectStyle: CSSProperties = {
+  height: "40px",
+  border: `1px solid ${colors.border}`,
+  borderRadius: "6px",
+  padding: "0 10px",
+  background: colors.white,
+  color: colors.navy,
+};
+
+const managerSmallHelpStyle: CSSProperties = {
+  color: colors.slate,
+  fontSize: "11px",
+  lineHeight: 1.35,
+};
+
+const managerMutedSmallStyle: CSSProperties = {
+  display: "block",
+  color: colors.slate,
+  fontSize: "11px",
+  fontWeight: 500,
+  marginTop: "3px",
+};
+
+const managerDividerStyle: CSSProperties = {
+  height: "1px",
+  background: colors.border,
+  margin: "14px 0",
+};
+
+const managerStatusPillSelectStyle: CSSProperties = {
+  border: "none",
+  background: "#FF5D68",
+  color: colors.white,
+  borderRadius: "7px",
+  padding: "5px 7px",
+  fontWeight: 900,
+  fontSize: "12px",
+};
+
+const managerPlainSelectStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: colors.slate,
+  fontWeight: 700,
+};
+
+const managerCalendarSideStyle: CSSProperties = {
+  background: colors.white,
+  display: "grid",
+  gridTemplateRows: "82px auto 1fr auto",
+};
+
+const managerCalendarTopStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  background: colors.orange,
+  color: colors.white,
+};
+
+const managerDateHeaderBlockStyle: CSSProperties = {
+  padding: "14px 24px",
+  display: "grid",
+  gap: "5px",
+  alignContent: "center",
+  textAlign: "center",
+};
+
+const managerDateHeaderLabelStyle: CSSProperties = {
+  fontSize: "12px",
+  fontWeight: 800,
+};
+
+const managerDateHeaderValueStyle: CSSProperties = {
+  fontSize: "18px",
+};
+
+const managerCalendarNavStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  padding: "20px 36px 8px",
+};
+
+const managerCalendarArrowStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: "#B8B8B8",
+  fontSize: "24px",
+  cursor: "pointer",
+};
+
+const managerCalendarGridStyle: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(7, 1fr)",
+  gap: "4px",
+  padding: "8px 34px 20px",
+  alignContent: "start",
+};
+
+const managerWeekdayStyle: CSSProperties = {
+  textAlign: "center",
+  fontSize: "13px",
+  color: colors.navy,
+  padding: "8px 0",
+};
+
+const managerDayButtonStyle: CSSProperties = {
+  height: "38px",
+  border: "none",
+  background: "transparent",
+  borderRadius: "999px",
+  cursor: "pointer",
+  color: colors.navy,
+  fontWeight: 700,
+};
+
+const managerSelectedDayStyle: CSSProperties = {
+  ...managerDayButtonStyle,
+  background: colors.orange,
+  color: colors.white,
+};
+
+const managerBlankDayStyle: CSSProperties = {
+  height: "38px",
+  border: "none",
+  background: "transparent",
+};
+
+const managerCalendarFooterStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  gap: "10px",
+  padding: "16px 28px",
+  borderTop: `1px solid ${colors.border}`,
+};
+
+const managerIconButtonStyle: CSSProperties = {
+  width: "32px",
+  height: "32px",
+  border: `1px solid ${colors.orange}`,
+  background: colors.white,
+  color: colors.orange,
+  borderRadius: "7px",
+  fontWeight: 900,
+  cursor: "pointer",
+};
+
+const managerCalendarCancelButtonStyle: CSSProperties = {
+  border: "none",
+  background: "transparent",
+  color: colors.navy,
+  fontWeight: 900,
+  padding: "10px 12px",
+  cursor: "pointer",
+};
+
+const managerCalendarDoneButtonStyle: CSSProperties = {
+  border: "none",
+  background: colors.orange,
+  color: colors.white,
+  borderRadius: "999px",
+  fontWeight: 900,
+  padding: "10px 18px",
+  cursor: "pointer",
+};
