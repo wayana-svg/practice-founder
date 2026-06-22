@@ -11,7 +11,8 @@ type Employee = {
 };
 
 type FormState = {
-  submitted_by: string;
+  revenue: string;
+submitted_by: string;
   week_start: string;
   week_end: string;
   is_this_completed: boolean;
@@ -37,7 +38,8 @@ type FormState = {
 const today = new Date().toISOString().slice(0, 10);
 
 const emptyForm: FormState = {
-  submitted_by: "",
+  revenue: "",
+submitted_by: "",
   week_start: today,
   week_end: today,
   is_this_completed: false,
@@ -277,7 +279,8 @@ export default function WeeklyFinancialReportPage() {
     setSaving(true);
 
     const payload = {
-      submitted_by: Number(form.submitted_by),
+      revenue: form.revenue ? Number(form.revenue) : null,
+submitted_by: Number(form.submitted_by),
       week_start: form.week_start,
       week_end: form.week_end,
       is_this_completed: form.is_this_completed,

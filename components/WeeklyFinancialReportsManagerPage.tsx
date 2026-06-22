@@ -15,6 +15,14 @@ const weeklyFinancialReportsManagerConfig: MasterManagerConfig = {
   defaultSortField: "week_start_date",
   fields: [
     {
+      key: "revenue",
+      label: "Revenue",
+      type: "currency",
+      description:
+        "Enter the actual revenue for this weekly financial report. This is typed manually and is not automatically calculated.",
+    },
+
+    {
       key: "submitted_by",
       label: "Submitted By",
       description:
