@@ -11,7 +11,8 @@ type Employee = {
 };
 
 type FormState = {
-  revenue: string;
+  revenue_collected: string;
+revenue: string;
 submitted_by: string;
   week_start: string;
   week_end: string;
@@ -38,7 +39,8 @@ submitted_by: string;
 const today = new Date().toISOString().slice(0, 10);
 
 const emptyForm: FormState = {
-  revenue: "",
+  revenue_collected: "",
+revenue: "",
 submitted_by: "",
   week_start: today,
   week_end: today,
@@ -279,7 +281,7 @@ export default function WeeklyFinancialReportPage() {
     setSaving(true);
 
     const payload = {
-      revenue: form.revenue ? Number(form.revenue) : null,
+revenue: form.revenue ? Number(form.revenue) : null,
 submitted_by: Number(form.submitted_by),
       week_start: form.week_start,
       week_end: form.week_end,
@@ -289,7 +291,6 @@ submitted_by: Number(form.submitted_by),
       other_deposits: toNumber(form.other_deposits),
       cash_card_check_payments: toNumber(form.cash_card_check_payments),
       insurance_payments: toNumber(form.insurance_payments),
-      revenue_collected: revenueCollected,
 
       payroll_for_week: toNumber(form.payroll_for_week),
       contractor_payments: toNumber(form.contractor_payments),
