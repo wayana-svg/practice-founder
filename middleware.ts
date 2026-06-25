@@ -3,10 +3,28 @@ import type { NextRequest } from "next/server";
 
 const PUBLIC_FILE = /\\.(.*)$/;
 
+const PUBLIC_FORM_PATHS = [
+  "/daily-receptionist-tracker",
+  "/daily-physician-tracker",
+  "/weekly-financial-report",
+  "/membership-tracker",
+  "/deliverables",
+  "/tasks",
+  "/issues-breakdowns",
+  "/roles",
+  "/employees",
+  "/ar-report-submissions",
+  "/charge-lag",
+  "/daily-billing-claims",
+  "/daily-operations-logs",
+  "/weekly-claims-summary",
+];
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   const isPublicPath =
+    PUBLIC_FORM_PATHS.includes(pathname) ||
     pathname === "/login" ||
     pathname.startsWith("/api/login") ||
     pathname.startsWith("/api/logout") ||
