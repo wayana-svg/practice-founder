@@ -1620,6 +1620,10 @@ export default function HomePage() {
               Open Manager
             </a>
 
+  <a href="/form-links" style={secondaryActionStyle}>
+    Public Form Links
+  </a>
+
             {selectedTable.addPath && (
               <a href={selectedTable.addPath} style={primaryActionStyle}>
                 + Add Record
