@@ -315,7 +315,7 @@ export default function DailyPhysicianTrackerPage() {
           </p>
         </div>
 
-        <a href="/daily-physician-tracker-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -710,7 +710,7 @@ export default function DailyPhysicianTrackerPage() {
             {saving ? "Submitting..." : "Submit Daily Physician Tracker"}
           </button>
 
-          <a href="/daily-physician-tracker-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

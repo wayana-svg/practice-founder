@@ -139,7 +139,7 @@ export default function DailyBillingClaimsPage() {
   return (
     <main style={pageStyle}>
       <section style={headerStyle}>
-        <a href="/daily-billing-claims-list" style={backLinkStyle}>
+        <a href="/" style={backLinkStyle}>
           ← Back to Daily Billing Manager
         </a>
 
@@ -362,7 +362,7 @@ export default function DailyBillingClaimsPage() {
         </section>
 
         <div style={footerStyle}>
-          <a href="/daily-billing-claims-list" style={secondaryLinkStyle}>
+          <a href="/" style={secondaryLinkStyle}>
             Cancel
           </a>
 

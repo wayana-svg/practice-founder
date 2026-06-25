@@ -392,7 +392,7 @@ export default function DailyReceptionistTrackerPage() {
           </p>
         </div>
 
-        <a href="/daily-receptionist-tracker-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -681,7 +681,7 @@ export default function DailyReceptionistTrackerPage() {
             {saving ? "Submitting..." : "Submit Daily Tracker"}
           </button>
 
-          <a href="/daily-receptionist-tracker-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

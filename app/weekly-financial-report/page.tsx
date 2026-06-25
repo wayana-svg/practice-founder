@@ -348,7 +348,7 @@ submitted_by: Number(form.submitted_by),
           </p>
         </div>
 
-        <a href="/weekly-financial-reports-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -751,7 +751,7 @@ submitted_by: Number(form.submitted_by),
             {saving ? "Submitting..." : "Submit Weekly Financial Report"}
           </button>
 
-          <a href="/weekly-financial-reports-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

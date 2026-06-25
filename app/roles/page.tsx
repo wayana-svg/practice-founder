@@ -264,7 +264,7 @@ const mustLogDescription = useMemo(
           </p>
         </div>
 
-        <a href="/roles-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -679,7 +679,7 @@ const mustLogDescription = useMemo(
             {saving ? "Submitting..." : "Submit Role"}
           </button>
 
-          <a href="/roles-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

@@ -572,7 +572,7 @@ export default function TasksPage() {
           </p>
         </div>
 
-        <a href="/tasks-list" style={managerLinkStyle}>
+        <a href="/" style={managerLinkStyle}>
           Open Manager
         </a>
       </section>

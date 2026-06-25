@@ -22,7 +22,7 @@ export default function DailyOperationsLogsPage() {
           </p>
         </div>
 
-        <a href="/daily-operations-logs-list" style={managerLinkStyle}>
+        <a href="/" style={managerLinkStyle}>
           Open Manager
         </a>
       </section>

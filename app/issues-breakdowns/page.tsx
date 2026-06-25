@@ -289,7 +289,7 @@ export default function IssuesBreakdownsPage() {
           </p>
         </div>
 
-        <a href="/issues-list" style={managerLinkStyle}>
+        <a href="/" style={managerLinkStyle}>
           Open Manager
         </a>
       </section>

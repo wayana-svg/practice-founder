@@ -166,7 +166,7 @@ export default function EmployeesPage() {
           </p>
         </div>
 
-        <a href="/employees-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -370,7 +370,7 @@ export default function EmployeesPage() {
             {saving ? "Submitting..." : "Submit Employee"}
           </button>
 
-          <a href="/employees-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

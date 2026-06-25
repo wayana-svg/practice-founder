@@ -286,7 +286,7 @@ export default function MembershipTrackerPage() {
           </p>
         </div>
 
-        <a href="/membership-tracker-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -555,7 +555,7 @@ export default function MembershipTrackerPage() {
             {saving ? "Submitting..." : "Submit Membership Tracker"}
           </button>
 
-          <a href="/membership-tracker-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 

@@ -186,7 +186,7 @@ export default function DeliverablesPage() {
           </p>
         </div>
 
-        <a href="/deliverables-list" style={managerButtonStyle}>
+        <a href="/" style={managerButtonStyle}>
           Open Manager
         </a>
       </header>
@@ -462,7 +462,7 @@ export default function DeliverablesPage() {
             {saving ? "Submitting..." : "Submit Deliverable"}
           </button>
 
-          <a href="/deliverables-list" style={secondaryButtonStyle}>
+          <a href="/" style={secondaryButtonStyle}>
             Open Manager
           </a>
 
