@@ -577,6 +577,31 @@ const sections: SectionConfig[] = [
         ],
         defaultColumns: ["embed_name", "embed_type", "is_active"],
       },
+
+    {
+      key: "public_form_links",
+      label: "Public Form Links",
+      description:
+        "Copy public add-record form links that can be shared without opening the full app.",
+      tableName: "form_links",
+      managerPath: "/form-links",
+      addPath: "/form-links",
+      columns: [
+        {
+          key: "form_name",
+          label: "Form",
+          type: "text",
+          description: "The public form name.",
+        },
+        {
+          key: "form_link",
+          label: "Link",
+          type: "text",
+          description: "The public form link.",
+        },
+      ],
+      defaultColumns: ["form_name", "form_link"],
+    },
       {
         key: "roles",
         label: "Roles",
@@ -1619,10 +1644,6 @@ export default function HomePage() {
             <a href={selectedTable.managerPath} style={secondaryActionStyle}>
               Open Manager
             </a>
-
-  <a href="/form-links" style={secondaryActionStyle}>
-    Public Form Links
-  </a>
 
             {selectedTable.addPath && (
               <a href={selectedTable.addPath} style={primaryActionStyle}>
